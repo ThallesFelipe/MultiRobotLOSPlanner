@@ -59,6 +59,7 @@ DEFAULT_DPI = 220
 DEFAULT_VERTEX_SOURCE = "boundary"
 DEFAULT_BOUNDARY_STRIDE = 1
 DEFAULT_MAX_VERTICES = 600
+DEFAULT_PREFER_FEWER_RELAYS = True
 
 FREE_SPACE_COLOR = "#F4F1E8"
 OBSTACLE_COLOR = "#1F2321"
@@ -826,6 +827,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--prefer-fewer-relays",
+        action="store_true",
+        dest="prefer_fewer_relays",
+        help=(
+            "Prioriza caminhos com menos relays antes do custo penalizado. "
+            f"Padrao: {DEFAULT_PREFER_FEWER_RELAYS}"
+        ),
+    )
+    parser.add_argument(
+        "--prefer-penalized-cost",
+        action="store_false",
+        dest="prefer_fewer_relays",
+        help="Usa apenas o menor custo penalizado C(P), sem priorizar menos relays.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -853,7 +869,10 @@ def parse_args() -> argparse.Namespace:
         dest="show_visibility_edges",
         help="Oculta as arestas do grafo de visibilidade no fundo da imagem.",
     )
-    parser.set_defaults(show_visibility_edges=True)
+    parser.set_defaults(
+        show_visibility_edges=True,
+        prefer_fewer_relays=DEFAULT_PREFER_FEWER_RELAYS,
+    )
 
     return parser.parse_args()
 
@@ -978,6 +997,7 @@ def main() -> None:
         target=target_grid_point,
         lam=args.lam,
         grid_obj=map_grid,
+        prefer_fewer_relays=args.prefer_fewer_relays,
     )
 
     output_path = args.output if args.output is not None else _default_output_path(source_name)

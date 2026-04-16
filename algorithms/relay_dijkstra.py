@@ -28,6 +28,7 @@ def relay_dijkstra(
     source: NodeT,
     target: NodeT,
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
+    prefer_fewer_relays: bool = True,
 ) -> tuple[float, list[NodeT]]:
     """Computes a minimum-cost path with relay penalty over a weighted graph.
 
@@ -36,6 +37,9 @@ def relay_dijkstra(
         source: Start node for the path search.
         target: Goal node for the path search.
         lam: Relay penalty `λ` added per traversed edge in the path cost `C(P)`.
+        prefer_fewer_relays: When `True`, the search prioritizes paths with
+            fewer traversed edges (fewer relay robots) before minimizing
+            penalized cost and geometric distance.
 
     Returns:
         A tuple `(cost, path)` where `cost` is the objective value `C(P)` and
@@ -55,6 +59,99 @@ def relay_dijkstra(
         return INFINITE_PATH_COST, []
 
     tie_breaker_counter = 0
+
+    if prefer_fewer_relays:
+        def push_fewer_relay_candidate(
+            priority_queue: list[tuple[int, float, float, int, NodeT, list[NodeT]]],
+            traversed_edge_count: int,
+            total_cost: float,
+            accumulated_euclidean_distance: float,
+            node: NodeT,
+            path: list[NodeT],
+        ) -> None:
+            """Pushes one lexicographic candidate favoring fewer traversed edges."""
+            nonlocal tie_breaker_counter
+            tie_breaker_counter += 1
+            heapq.heappush(
+                priority_queue,
+                (
+                    traversed_edge_count,
+                    total_cost,
+                    accumulated_euclidean_distance,
+                    tie_breaker_counter,
+                    node,
+                    path,
+                ),
+            )
+
+        priority_queue_fewer_relays: list[
+            tuple[int, float, float, int, NodeT, list[NodeT]]
+        ] = []
+        best_label_by_node: dict[NodeT, tuple[int, float, float]] = {
+            source: (0, 0.0, 0.0)
+        }
+
+        push_fewer_relay_candidate(
+            priority_queue_fewer_relays,
+            0,
+            0.0,
+            0.0,
+            source,
+            [source],
+        )
+
+        while priority_queue_fewer_relays:
+            (
+                traversed_edge_count,
+                total_cost,
+                accumulated_euclidean_distance,
+                _,
+                current_node,
+                current_path,
+            ) = heapq.heappop(priority_queue_fewer_relays)
+
+            current_label = (
+                traversed_edge_count,
+                total_cost,
+                accumulated_euclidean_distance,
+            )
+            if best_label_by_node.get(current_node) != current_label:
+                continue
+
+            if current_node == target:
+                return total_cost, current_path
+
+            for neighbor_node in graph.neighbors(current_node):
+                edge_distance = graph[current_node][neighbor_node]["weight"]
+                new_accumulated_euclidean_distance = (
+                    accumulated_euclidean_distance + edge_distance
+                )
+                new_traversed_edge_count = traversed_edge_count + 1
+                new_total_cost = new_accumulated_euclidean_distance + (
+                    new_traversed_edge_count * lam
+                )
+
+                new_label = (
+                    new_traversed_edge_count,
+                    new_total_cost,
+                    new_accumulated_euclidean_distance,
+                )
+
+                best_known_label = best_label_by_node.get(neighbor_node)
+                if best_known_label is not None and new_label >= best_known_label:
+                    continue
+
+                best_label_by_node[neighbor_node] = new_label
+                push_fewer_relay_candidate(
+                    priority_queue_fewer_relays,
+                    new_traversed_edge_count,
+                    new_total_cost,
+                    new_accumulated_euclidean_distance,
+                    neighbor_node,
+                    current_path + [neighbor_node],
+                )
+
+        return INFINITE_PATH_COST, []
 
     def push_candidate(
         priority_queue: list[tuple[float, float, int, int, NodeT, list[NodeT]]],

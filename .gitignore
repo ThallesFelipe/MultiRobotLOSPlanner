@@ -1,0 +1,44 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checking, lint, and tool caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Packaging/build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+
+# Generated exports (keep folder with .gitkeep if needed)
+exports/*
+!exports/.gitkeep

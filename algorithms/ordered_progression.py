@@ -274,6 +274,7 @@ def plan_ordered_progression_on_visibility_graph(
     target: GridPoint,
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
     grid_obj: MapGrid | None = None,
+    prefer_fewer_relays: bool = False,
 ) -> OrderedPathPlanningResult:
     """Plans a visibility-graph path and expands it with ordered progression.
 
@@ -283,6 +284,8 @@ def plan_ordered_progression_on_visibility_graph(
         target: Goal occupancy-grid point.
         lam: Relay penalty used by relay-penalty Dijkstra.
         grid_obj: Optional occupancy grid for midpoint LOS checks.
+        prefer_fewer_relays: When `True`, prioritizes paths with fewer relays
+            before penalized-cost minimization.
 
     Returns:
         Planning result with the path, movement snapshots, and summary metrics.
@@ -293,6 +296,7 @@ def plan_ordered_progression_on_visibility_graph(
         source,
         target,
         lam=lam,
+        prefer_fewer_relays=prefer_fewer_relays,
     )
     if path_cost == INFINITE_PATH_COST or not planned_path:
         return {

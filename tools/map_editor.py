@@ -5,6 +5,7 @@ export them as Python presets that match the project's `MapGrid` API.
 
 Features:
 - Configurable map dimensions (`rows`, `cols`) on startup.
+- Load existing maps from the shared JSON catalog for further editing.
 - Left-click + drag paints obstacle cells (`C_obs`).
 - Right-click + drag erases cells back to free space (`C_free`).
 - Status bar displays current grid cursor coordinates.
@@ -27,7 +28,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from presets.map_catalog import DEFAULT_CATALOG_PATH, upsert_catalog_map
+from core.map_grid import MapGrid
+from presets.map_catalog import (
+    DEFAULT_CATALOG_PATH,
+    create_map_from_catalog,
+    list_catalog_maps,
+    upsert_catalog_map,
+)
 
 
 PALETTE: dict[str, str] = {
@@ -159,6 +166,11 @@ class MapEditorApp(tk.Tk):
             side=tk.LEFT,
             padx=(4, 8),
         )
+        self._create_button(
+            top_panel,
+            "Carregar Catalogo JSON",
+            self.load_catalog_map,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         self._create_button(top_panel, "Limpar", self.clear_obstacles).pack(
             side=tk.LEFT,
             padx=(0, 8),
@@ -269,26 +281,8 @@ class MapEditorApp(tk.Tk):
 
         return parsed
 
-    def create_map_from_inputs(self) -> None:
-        """Creates/recreates the drawing map based on panel inputs."""
-        try:
-            rows = self._parse_positive_int(self.config_var_rows.get().strip(), "Rows")
-            cols = self._parse_positive_int(self.config_var_cols.get().strip(), "Cols")
-            cell_size = self._parse_positive_int(
-                self.config_var_cell_size.get().strip(),
-                "Cell Size",
-            )
-        except ValueError as error:
-            messagebox.showerror("Entrada invalida", str(error))
-            return
-
-        if not (MIN_CELL_SIZE <= cell_size <= MAX_CELL_SIZE):
-            messagebox.showerror(
-                "Entrada invalida",
-                f"Cell Size deve estar entre {MIN_CELL_SIZE} e {MAX_CELL_SIZE}.",
-            )
-            return
-
+    def _reset_canvas_map(self, rows: int, cols: int, cell_size: int) -> None:
+        """Resets canvas and editor state for a map with given dimensions."""
         self.config_state = EditorConfig(rows=rows, cols=cols, cell_size=cell_size)
         self.obstacles.clear()
         self.obstacle_items.clear()
@@ -310,6 +304,84 @@ class MapEditorApp(tk.Tk):
         )
         self._draw_grid_lines(rows=rows, cols=cols, cell_size=cell_size)
         self._update_status(None)
+
+    def _cell_size_for_loaded_map(self) -> int:
+        """Returns a valid cell size when loading map data into the editor."""
+        raw_cell_size = self.config_var_cell_size.get().strip()
+        try:
+            cell_size = self._parse_positive_int(raw_cell_size, "Cell Size")
+        except ValueError:
+            cell_size = DEFAULT_CELL_SIZE
+
+        if not (MIN_CELL_SIZE <= cell_size <= MAX_CELL_SIZE):
+            cell_size = DEFAULT_CELL_SIZE
+
+        self.config_var_cell_size.set(str(cell_size))
+        return cell_size
+
+    def _load_map_grid(self, map_grid: MapGrid) -> None:
+        """Loads an existing `MapGrid` instance into the editor canvas."""
+        cell_size = self._cell_size_for_loaded_map()
+
+        self.config_var_rows.set(str(map_grid.rows))
+        self.config_var_cols.set(str(map_grid.cols))
+        self._reset_canvas_map(rows=map_grid.rows, cols=map_grid.cols, cell_size=cell_size)
+
+        for row_index in range(map_grid.rows):
+            for col_index in range(map_grid.cols):
+                if not map_grid.is_free(row_index, col_index):
+                    self._paint_cell(row_index, col_index)
+
+        self._update_status(None)
+
+    def _resolve_catalog_map_choice(
+        self,
+        raw_choice: str,
+        available_maps: list[str],
+    ) -> str:
+        """Resolves user input as a valid catalog map name."""
+        normalized_choice = raw_choice.strip()
+        if not normalized_choice:
+            raise ValueError("Nome do mapa nao pode estar vazio.")
+
+        if normalized_choice.isdigit():
+            selected_index = int(normalized_choice)
+            if 1 <= selected_index <= len(available_maps):
+                return available_maps[selected_index - 1]
+
+        if normalized_choice in available_maps:
+            return normalized_choice
+
+        lowered_choice = normalized_choice.lower()
+        matching_names = [
+            map_name for map_name in available_maps if map_name.lower() == lowered_choice
+        ]
+        if len(matching_names) == 1:
+            return matching_names[0]
+
+        raise ValueError(f"Mapa {normalized_choice!r} nao encontrado no catalogo.")
+
+    def create_map_from_inputs(self) -> None:
+        """Creates/recreates the drawing map based on panel inputs."""
+        try:
+            rows = self._parse_positive_int(self.config_var_rows.get().strip(), "Rows")
+            cols = self._parse_positive_int(self.config_var_cols.get().strip(), "Cols")
+            cell_size = self._parse_positive_int(
+                self.config_var_cell_size.get().strip(),
+                "Cell Size",
+            )
+        except ValueError as error:
+            messagebox.showerror("Entrada invalida", str(error))
+            return
+
+        if not (MIN_CELL_SIZE <= cell_size <= MAX_CELL_SIZE):
+            messagebox.showerror(
+                "Entrada invalida",
+                f"Cell Size deve estar entre {MIN_CELL_SIZE} e {MAX_CELL_SIZE}.",
+            )
+            return
+
+        self._reset_canvas_map(rows=rows, cols=cols, cell_size=cell_size)
 
     def _draw_grid_lines(self, rows: int, cols: int, cell_size: int) -> None:
         """Draws grid lines over the map area for visual cell guidance."""
@@ -424,6 +496,71 @@ class MapEditorApp(tk.Tk):
         self.obstacle_items.clear()
         self.obstacles.clear()
         self._update_status(None)
+
+    def load_catalog_map(self) -> None:
+        """Loads an existing map from the shared JSON map catalog."""
+        try:
+            available_maps = list_catalog_maps(DEFAULT_CATALOG_PATH)
+        except ValueError as error:
+            messagebox.showerror("Falha ao ler catalogo", str(error), parent=self)
+            return
+
+        if not available_maps:
+            messagebox.showinfo(
+                "Catalogo vazio",
+                (
+                    "Nenhum mapa encontrado em:\n"
+                    f"{DEFAULT_CATALOG_PATH}\n\n"
+                    "Use 'Exportar Catalogo JSON' para salvar um mapa primeiro."
+                ),
+                parent=self,
+            )
+            return
+
+        preview_limit = 20
+        preview_lines = [
+            f"[{index}] {map_name}"
+            for index, map_name in enumerate(available_maps[:preview_limit], start=1)
+        ]
+        if len(available_maps) > preview_limit:
+            preview_lines.append(
+                f"... e mais {len(available_maps) - preview_limit} mapa(s)."
+            )
+
+        raw_choice = simpledialog.askstring(
+            "Carregar Catalogo JSON",
+            (
+                "Escolha o mapa salvo (numero ou nome):\n\n"
+                + "\n".join(preview_lines)
+            ),
+            initialvalue="1",
+            parent=self,
+        )
+        if raw_choice is None:
+            return
+
+        try:
+            selected_map_name = self._resolve_catalog_map_choice(raw_choice, available_maps)
+            map_grid = create_map_from_catalog(
+                map_name=selected_map_name,
+                scale_factor=1,
+                catalog_path=DEFAULT_CATALOG_PATH,
+            )
+        except ValueError as error:
+            messagebox.showerror("Falha ao carregar mapa", str(error), parent=self)
+            return
+
+        self._load_map_grid(map_grid)
+
+        messagebox.showinfo(
+            "Mapa carregado",
+            (
+                f"Mapa carregado do catalogo: {selected_map_name}\n\n"
+                f"Dimensoes: {self.config_state.rows}x{self.config_state.cols}\n"
+                f"Celulas de obstaculo: {len(self.obstacles)}"
+            ),
+            parent=self,
+        )
 
     def _normalize_preset_name(self, raw_name: str) -> str:
         """Normalizes and validates a preset module name."""

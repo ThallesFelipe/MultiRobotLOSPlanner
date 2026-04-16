@@ -78,6 +78,32 @@ def test_relay_dijkstra_uses_default_lambda() -> None:
     assert math.isclose(cost, 3.5, rel_tol=1e-12, abs_tol=1e-12)
 
 
+def test_relay_dijkstra_can_prioritize_fewer_relays() -> None:
+    """Checks optional lexicographic mode that prefers fewer relay hops."""
+    graph = _build_graph(
+        [
+            ("A", "B", 1.0),
+            ("B", "C", 1.0),
+            ("A", "C", 4.0),
+        ]
+    )
+
+    cost_default, path_default = relay_dijkstra(graph, "A", "C", lam=1.0)
+    cost_fewer_relays, path_fewer_relays = relay_dijkstra(
+        graph,
+        "A",
+        "C",
+        lam=1.0,
+        prefer_fewer_relays=True,
+    )
+
+    assert path_default == ["A", "B", "C"]
+    assert math.isclose(cost_default, 4.0, rel_tol=1e-12, abs_tol=1e-12)
+
+    assert path_fewer_relays == ["A", "C"]
+    assert math.isclose(cost_fewer_relays, 5.0, rel_tol=1e-12, abs_tol=1e-12)
+
+
 def test_relay_dijkstra_source_equals_target() -> None:
     """Confirms zero-cost trivial path when source and target are identical."""
     graph: nx.Graph[NodeName] = nx.Graph()

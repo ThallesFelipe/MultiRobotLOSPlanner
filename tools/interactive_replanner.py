@@ -1,0 +1,973 @@
+"""Interactive GUI demo for ordered_progression + reactive_replanning.
+
+Launches a Tkinter window that embeds a Matplotlib map view where the user can:
+1. Pick a map from the JSON catalog.
+2. Click the map to define source (green) and target (red) points.
+3. Run `ordered_progression` step by step, watching each robot move.
+4. Click at any moment to insert a dynamic obstacle; as soon as it invalidates
+   the current plan, `reactive_replanning` is automatically triggered.
+5. See the original path, the blocked segment, the replanned path and the new
+   per-step execution on the same canvas.
+
+Every algorithmic event is logged in the side panel so the execution is fully
+transparent.
+
+Usage:
+    python tools/interactive_replanner.py
+"""
+
+from __future__ import annotations
+
+import sys
+import tkinter as tk
+from pathlib import Path
+from tkinter import messagebox, ttk
+from typing import Any, Callable, cast
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import matplotlib
+
+matplotlib.use("TkAgg")
+
+import networkx as nx
+import numpy as np
+from matplotlib import colors as mcolors
+from matplotlib import patches as mpatches
+from matplotlib.backend_bases import Event, MouseEvent
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends._backend_tk import NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
+from algorithms.ordered_progression import (
+    MovementSnapshot,
+    ordered_progression,
+)
+from algorithms.reactive_replanning import reactive_replanning
+from algorithms.relay_dijkstra import (
+    DEFAULT_RELAY_PENALTY_LAMBDA,
+    INFINITE_PATH_COST,
+    relay_dijkstra,
+)
+from core.map_grid import GridPoint, MapGrid
+from core.visibility import has_line_of_sight
+from core.visibility_graph import build_visibility_graph
+from presets.map_catalog import (
+    DEFAULT_CATALOG_PATH,
+    create_map_from_catalog,
+    list_catalog_maps,
+)
+
+# --- Visual theme -----------------------------------------------------------
+FREE_SPACE_COLOR = "#F4F1E8"
+OBSTACLE_COLOR = "#1F2321"
+DYNAMIC_OBSTACLE_COLOR = "#8E1A1A"
+ORIGINAL_PATH_COLOR = "#1F4D3A"
+REPLANNED_PATH_COLOR = "#C0681B"
+BLOCKED_PATH_COLOR = "#7A7A7A"
+SOURCE_COLOR = "#1F4D3A"
+TARGET_COLOR = "#C7472D"
+ROBOT_PALETTE: tuple[str, ...] = (
+    "#E2572C",
+    "#1F4D3A",
+    "#C0681B",
+    "#3E5C76",
+    "#8E6C8A",
+    "#5D7052",
+    "#B5651D",
+    "#4A6FA5",
+)
+
+DEFAULT_BOUNDARY_STRIDE = 1
+DEFAULT_MAX_VERTICES = 600
+DEFAULT_STEP_DELAY_MS = 350
+DEFAULT_OBSTACLE_RADIUS = 1
+
+
+def _euclidean_distance(p1: GridPoint, p2: GridPoint) -> float:
+    return float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
+
+
+def _extract_boundary_vertices(
+    map_grid: MapGrid,
+    boundary_stride: int = DEFAULT_BOUNDARY_STRIDE,
+    max_vertices: int | None = DEFAULT_MAX_VERTICES,
+) -> list[GridPoint]:
+    """Extracts free cells that touch obstacle cells to serve as graph vertices."""
+    if boundary_stride <= 0:
+        raise ValueError("boundary_stride must be greater than 0.")
+
+    vertices: list[GridPoint] = []
+    for row in range(map_grid.rows):
+        for col in range(map_grid.cols):
+            if not map_grid.is_free(row, col):
+                continue
+            if ((row + col) % boundary_stride) != 0:
+                continue
+
+            has_obstacle_neighbor = False
+            for d_row in (-1, 0, 1):
+                for d_col in (-1, 0, 1):
+                    if d_row == 0 and d_col == 0:
+                        continue
+                    n_row, n_col = row + d_row, col + d_col
+                    if not map_grid.in_bounds(n_row, n_col):
+                        continue
+                    if not map_grid.is_free(n_row, n_col):
+                        has_obstacle_neighbor = True
+                        break
+                if has_obstacle_neighbor:
+                    break
+
+            if has_obstacle_neighbor:
+                vertices.append((row, col))
+
+    if max_vertices is not None and len(vertices) > max_vertices:
+        sampling_step = max(1, len(vertices) // max_vertices)
+        vertices = vertices[::sampling_step]
+    return vertices
+
+
+def _connect_endpoint(
+    graph: nx.Graph[GridPoint],
+    map_grid: MapGrid,
+    endpoint: GridPoint,
+) -> None:
+    """Adds an endpoint node with LOS edges to the visibility graph."""
+    if endpoint not in graph:
+        graph.add_node(endpoint)
+    for candidate in list(graph.nodes):
+        if candidate == endpoint:
+            continue
+        if not has_line_of_sight(map_grid, endpoint, candidate):
+            continue
+        if not graph.has_edge(endpoint, candidate):
+            graph.add_edge(
+                endpoint,
+                candidate,
+                weight=_euclidean_distance(endpoint, candidate),
+            )
+
+
+class InteractiveReplannerApp(tk.Tk):
+    """Main application window for the interactive replanner demo."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Interactive Ordered Progression + Reactive Replanning")
+        self.geometry("1500x900")
+        self.minsize(1200, 760)
+
+        # --- State ---------------------------------------------------------
+        self.catalog_path: Path = DEFAULT_CATALOG_PATH
+        self.map_grid: MapGrid | None = None
+        self.base_map_array: np.ndarray | None = None
+        self.dynamic_obstacles: set[GridPoint] = set()
+
+        self.source_point: GridPoint | None = None
+        self.target_point: GridPoint | None = None
+
+        self.base_vis_graph: nx.Graph[GridPoint] | None = None
+        self.planning_graph: nx.Graph[GridPoint] | None = None
+
+        self.original_path: list[GridPoint] = []
+        self.current_path: list[GridPoint] = []
+
+        self.snapshots: list[MovementSnapshot] = []
+        self.current_snapshot_index: int = 0
+        self.current_positions: dict[int, GridPoint] = {}
+        self.n_robots: int = 0
+
+        self.click_mode: str = "source"  # 'source', 'target', 'obstacle'
+        self.playing: bool = False
+        self.play_job: str | None = None
+        self.replanning_active: bool = False
+
+        # --- Tk variables --------------------------------------------------
+        self.map_name_var = tk.StringVar()
+        self.mode_var = tk.StringVar(value="source")
+        self.status_var = tk.StringVar(
+            value="Selecione um mapa e clique em 'Carregar mapa'."
+        )
+        self.step_info_var = tk.StringVar(value="Step: -")
+        self.speed_var = tk.IntVar(value=DEFAULT_STEP_DELAY_MS)
+        self.obstacle_radius_var = tk.IntVar(value=DEFAULT_OBSTACLE_RADIUS)
+
+        self._build_layout()
+        self._refresh_map_list()
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+    def _build_layout(self) -> None:
+        top = ttk.Frame(self, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(top, text="Mapa:").pack(side=tk.LEFT)
+        self.map_combo = ttk.Combobox(
+            top, textvariable=self.map_name_var, width=28, state="readonly"
+        )
+        self.map_combo.pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Button(top, text="Carregar mapa", command=self._on_load_map).pack(
+            side=tk.LEFT
+        )
+        ttk.Separator(top, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8
+        )
+
+        ttk.Label(top, text="Clique define:").pack(side=tk.LEFT)
+        for label, value in (
+            ("Início", "source"),
+            ("Destino", "target"),
+            ("Obstáculo", "obstacle"),
+        ):
+            ttk.Radiobutton(
+                top,
+                text=label,
+                value=value,
+                variable=self.mode_var,
+                command=self._on_mode_change,
+            ).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(top, text="Raio obst.:").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Spinbox(
+            top,
+            from_=0,
+            to=10,
+            textvariable=self.obstacle_radius_var,
+            width=4,
+        ).pack(side=tk.LEFT)
+
+        ttk.Separator(top, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8
+        )
+        ttk.Button(
+            top, text="Planejar (Ordered)", command=self._on_plan
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(top, text="⏮", width=3, command=self._on_first).pack(
+            side=tk.LEFT, padx=1
+        )
+        ttk.Button(top, text="◀", width=3, command=self._on_prev).pack(
+            side=tk.LEFT, padx=1
+        )
+        self.play_button = ttk.Button(
+            top, text="▶ Play", width=8, command=self._on_play_pause
+        )
+        self.play_button.pack(side=tk.LEFT, padx=1)
+        ttk.Button(top, text="▶", width=3, command=self._on_next).pack(
+            side=tk.LEFT, padx=1
+        )
+        ttk.Button(top, text="⏭", width=3, command=self._on_last).pack(
+            side=tk.LEFT, padx=1
+        )
+
+        ttk.Label(top, text="Delay (ms):").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Spinbox(
+            top,
+            from_=50,
+            to=2000,
+            increment=50,
+            textvariable=self.speed_var,
+            width=6,
+        ).pack(side=tk.LEFT)
+
+        ttk.Separator(top, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8
+        )
+        ttk.Button(
+            top, text="Limpar obstáculos", command=self._on_clear_obstacles
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(top, text="Resetar pontos", command=self._on_reset_points).pack(
+            side=tk.LEFT, padx=2
+        )
+
+        # --- Body: canvas + side log --------------------------------------
+        body = ttk.Frame(self)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        canvas_frame = ttk.Frame(body)
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Matplotlib type stubs are incomplete for strict Pylance settings.
+        # We keep runtime behavior unchanged and cast plotting objects.
+        self.figure: Any = Figure(figsize=(9, 7), dpi=100)
+        self.ax: Any = self.figure.add_subplot(111)
+        self.ax.set_facecolor(FREE_SPACE_COLOR)
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=canvas_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        toolbar = NavigationToolbar2Tk(self.canvas, canvas_frame)
+        toolbar.update()
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+
+        side = ttk.Frame(body, padding=6)
+        side.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Label(side, text="Passo a passo", font=("TkDefaultFont", 10, "bold")).pack(
+            anchor=tk.W
+        )
+        ttk.Label(side, textvariable=self.step_info_var).pack(anchor=tk.W)
+
+        log_frame = ttk.Frame(side)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+        self.log_text = tk.Text(
+            log_frame, width=48, height=30, wrap=tk.WORD, state=tk.DISABLED
+        )
+        yview_command = cast(Callable[..., Any], getattr(self.log_text, "yview"))
+        log_scroll = ttk.Scrollbar(
+            log_frame,
+            orient=tk.VERTICAL,
+            command=yview_command,
+        )
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.log_text.tag_configure("info", foreground="#1F4D3A")
+        self.log_text.tag_configure("warn", foreground="#C0681B")
+        self.log_text.tag_configure("error", foreground="#8E1A1A")
+        self.log_text.tag_configure("step", foreground="#3E5C76")
+
+        status_bar = ttk.Frame(self, padding=4)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(status_bar, textvariable=self.status_var, anchor=tk.W).pack(
+            fill=tk.X
+        )
+
+    # ------------------------------------------------------------------
+    # Map loading
+    # ------------------------------------------------------------------
+    def _refresh_map_list(self) -> None:
+        try:
+            maps = list_catalog_maps(self.catalog_path)
+        except Exception as exc:  # pragma: no cover - defensive UI path
+            messagebox.showerror("Catálogo", f"Falha ao ler catálogo: {exc}")
+            maps = []
+        self.map_combo["values"] = maps
+        if maps and not self.map_name_var.get():
+            self.map_name_var.set(maps[0])
+
+    def _on_load_map(self) -> None:
+        map_name = self.map_name_var.get().strip()
+        if not map_name:
+            messagebox.showwarning("Mapa", "Selecione um mapa do catálogo.")
+            return
+
+        try:
+            map_grid = create_map_from_catalog(map_name, catalog_path=self.catalog_path)
+        except Exception as exc:
+            messagebox.showerror("Mapa", f"Erro ao carregar mapa: {exc}")
+            return
+
+        self.map_grid = map_grid
+        self.base_map_array = map_grid.grid.astype(np.int32).copy()
+        self.dynamic_obstacles.clear()
+        self.source_point = None
+        self.target_point = None
+        self.snapshots = []
+        self.current_snapshot_index = 0
+        self.current_positions = {}
+        self.original_path = []
+        self.current_path = []
+        self.replanning_active = False
+        self._stop_playback()
+
+        self._log(f"Mapa '{map_name}' carregado ({map_grid.rows}x{map_grid.cols}).", "info")
+        self._set_status("Mapa carregado. Clique no mapa para definir origem e destino.")
+
+        self._log("Construindo grafo de visibilidade (vertices de borda)...", "info")
+        vertices = _extract_boundary_vertices(map_grid)
+        self.base_vis_graph = build_visibility_graph(map_grid, vertices)
+        self._log(
+            f"Grafo base: {self.base_vis_graph.number_of_nodes()} vertices, "
+            f"{self.base_vis_graph.number_of_edges()} arestas.",
+            "info",
+        )
+        self.planning_graph = None
+
+        self.mode_var.set("source")
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Click dispatch
+    # ------------------------------------------------------------------
+    def _on_mode_change(self) -> None:
+        self.click_mode = self.mode_var.get()
+        self._set_status(
+            {
+                "source": "Clique no mapa para definir a ORIGEM.",
+                "target": "Clique no mapa para definir o DESTINO.",
+                "obstacle": "Clique no mapa para inserir um OBSTÁCULO dinâmico.",
+            }.get(self.click_mode, "")
+        )
+
+    def _on_canvas_click(self, event: Event) -> None:
+        if not isinstance(event, MouseEvent):
+            return
+        if event.inaxes is not self.ax:
+            return
+        if self.map_grid is None or event.xdata is None or event.ydata is None:
+            return
+
+        col = int(round(float(event.xdata)))
+        row = int(round(float(event.ydata)))
+        if not self.map_grid.in_bounds(row, col):
+            return
+
+        mode = self.mode_var.get()
+        point: GridPoint = (row, col)
+
+        if mode == "source":
+            self._set_source(point)
+        elif mode == "target":
+            self._set_target(point)
+        elif mode == "obstacle":
+            self._insert_obstacle(point)
+
+    def _set_source(self, point: GridPoint) -> None:
+        assert self.map_grid is not None
+        if self._is_blocked_cell(point):
+            self._log(f"Origem {point} cai em obstáculo; escolha célula livre.", "error")
+            return
+        self.source_point = point
+        self._log(f"Origem definida em {point}.", "info")
+        self.mode_var.set("target" if self.target_point is None else "source")
+        self._on_mode_change()
+        self._render()
+
+    def _set_target(self, point: GridPoint) -> None:
+        assert self.map_grid is not None
+        if self._is_blocked_cell(point):
+            self._log(f"Destino {point} cai em obstáculo; escolha célula livre.", "error")
+            return
+        self.target_point = point
+        self._log(f"Destino definido em {point}.", "info")
+        self._render()
+
+    def _insert_obstacle(self, point: GridPoint) -> None:
+        """Inserts a dynamic obstacle. Triggers reactive replanning if needed."""
+        assert self.map_grid is not None and self.base_map_array is not None
+        radius = max(0, int(self.obstacle_radius_var.get()))
+
+        new_cells: set[GridPoint] = set()
+        for d_row in range(-radius, radius + 1):
+            for d_col in range(-radius, radius + 1):
+                cell = (point[0] + d_row, point[1] + d_col)
+                if not self.map_grid.in_bounds(cell[0], cell[1]):
+                    continue
+                if cell == self.source_point or cell == self.target_point:
+                    continue
+                new_cells.add(cell)
+
+        if not new_cells:
+            return
+
+        # Mark obstacles on grid + base_map_array
+        for cell in new_cells:
+            if cell in self.dynamic_obstacles:
+                continue
+            self.dynamic_obstacles.add(cell)
+            try:
+                self.map_grid.add_obstacle(cell[0], cell[1])
+            except ValueError:
+                continue
+
+        self._log(
+            f"Obstáculo dinâmico inserido em {point} (raio={radius}, "
+            f"{len(new_cells)} células).",
+            "warn",
+        )
+        self._render()
+
+        # Decide whether replanning is needed.
+        if self.snapshots and self.current_positions and self.current_path:
+            self._maybe_trigger_replanning(point)
+
+    # ------------------------------------------------------------------
+    # Planning
+    # ------------------------------------------------------------------
+    def _on_plan(self) -> None:
+        if self.map_grid is None or self.base_vis_graph is None:
+            messagebox.showwarning("Planejar", "Carregue um mapa primeiro.")
+            return
+        if self.source_point is None or self.target_point is None:
+            messagebox.showwarning(
+                "Planejar", "Defina origem e destino clicando no mapa."
+            )
+            return
+
+        self._stop_playback()
+        self._log(
+            "=== Planejamento inicial (ordered_progression) ===", "info"
+        )
+
+        planning_graph = self.base_vis_graph.copy()
+        _connect_endpoint(planning_graph, self.map_grid, self.source_point)
+        _connect_endpoint(planning_graph, self.map_grid, self.target_point)
+        self.planning_graph = planning_graph
+
+        cost, path = relay_dijkstra(
+            planning_graph,
+            self.source_point,
+            self.target_point,
+            lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+            prefer_fewer_relays=True,
+        )
+        if cost == INFINITE_PATH_COST or not path:
+            self._log("Nenhum caminho viável encontrado.", "error")
+            self._set_status("Sem caminho. Altere pontos ou limpe obstáculos.")
+            self.snapshots = []
+            self.current_path = []
+            self.original_path = []
+            self._render()
+            return
+
+        self.original_path = list(path)
+        self.current_path = list(path)
+        self.replanning_active = False
+
+        self._log(
+            f"Caminho encontrado: {len(path)} vertices, custo={cost:.3f}.",
+            "info",
+        )
+        self._log(f"Caminho: {path}", "step")
+
+        snapshots = ordered_progression(
+            path,
+            grid_obj=self.map_grid,
+            vis_graph=planning_graph,
+        )
+        self._install_snapshots(snapshots, f"ordered_progression ({len(snapshots) - 1} movimentos)")
+
+    def _install_snapshots(self, snapshots: list[MovementSnapshot], label: str) -> None:
+        """Installs a snapshot sequence and resets the playback cursor."""
+        self.snapshots = snapshots
+        self.current_snapshot_index = 0
+        if snapshots:
+            self.current_positions = dict(snapshots[0]["positions"])
+            self.n_robots = len(self.current_positions)
+            self._log(f"Cronograma instalado: {label}.", "info")
+            self._log_snapshot(snapshots[0])
+        else:
+            self.current_positions = {}
+            self.n_robots = 0
+        self._update_step_info()
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Playback controls
+    # ------------------------------------------------------------------
+    def _on_play_pause(self) -> None:
+        if not self.snapshots:
+            return
+        if self.playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+
+    def _start_playback(self) -> None:
+        if self.current_snapshot_index >= len(self.snapshots) - 1:
+            self.current_snapshot_index = 0
+            self._apply_current_snapshot()
+        self.playing = True
+        self.play_button.configure(text="⏸ Pause")
+        self._schedule_next_step()
+
+    def _stop_playback(self) -> None:
+        self.playing = False
+        self.play_button.configure(text="▶ Play")
+        if self.play_job is not None:
+            try:
+                self.after_cancel(self.play_job)
+            except Exception:
+                pass
+            self.play_job = None
+
+    def _schedule_next_step(self) -> None:
+        delay = max(50, int(self.speed_var.get()))
+        self.play_job = self.after(delay, self._play_tick)
+
+    def _play_tick(self) -> None:
+        if not self.playing:
+            return
+        if self.current_snapshot_index >= len(self.snapshots) - 1:
+            self._stop_playback()
+            return
+        self._on_next()
+        if self.playing:
+            self._schedule_next_step()
+
+    def _on_first(self) -> None:
+        if not self.snapshots:
+            return
+        self.current_snapshot_index = 0
+        self._apply_current_snapshot()
+
+    def _on_last(self) -> None:
+        if not self.snapshots:
+            return
+        self.current_snapshot_index = len(self.snapshots) - 1
+        self._apply_current_snapshot()
+
+    def _on_prev(self) -> None:
+        if not self.snapshots or self.current_snapshot_index <= 0:
+            return
+        self.current_snapshot_index -= 1
+        self._apply_current_snapshot()
+
+    def _on_next(self) -> None:
+        if not self.snapshots:
+            return
+        if self.current_snapshot_index >= len(self.snapshots) - 1:
+            return
+        self.current_snapshot_index += 1
+        self._apply_current_snapshot()
+
+    def _apply_current_snapshot(self) -> None:
+        snapshot = self.snapshots[self.current_snapshot_index]
+        self.current_positions = dict(snapshot["positions"])
+        self._log_snapshot(snapshot)
+        self._update_step_info()
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Reactive replanning
+    # ------------------------------------------------------------------
+    def _maybe_trigger_replanning(self, obstacle_point: GridPoint) -> None:
+        """Checks if current path is invalidated by new obstacle and replans."""
+        assert self.map_grid is not None
+
+        if not self.current_path:
+            return
+
+        # Check whether any edge of the current path has been broken.
+        broken = False
+        for i in range(len(self.current_path) - 1):
+            p1, p2 = self.current_path[i], self.current_path[i + 1]
+            if not has_line_of_sight(self.map_grid, p1, p2):
+                broken = True
+                break
+
+        if not broken:
+            self._log(
+                "Obstáculo não bloqueia o caminho atual; execução continua.",
+                "info",
+            )
+            return
+
+        self._log(
+            "!!! Caminho atual bloqueado pelo novo obstáculo. Disparando reactive_replanning.",
+            "warn",
+        )
+        self._set_status("Replanejamento reativo em execução...")
+        self._stop_playback()
+        self._trigger_reactive_replanning(obstacle_point)
+
+    def _trigger_reactive_replanning(self, obstacle_point: GridPoint) -> None:
+        """Rebuilds the visibility graph and runs reactive_replanning."""
+        assert self.map_grid is not None
+        assert self.source_point is not None and self.target_point is not None
+
+        # Rebuild visibility graph using updated grid (dynamic obstacles are live).
+        self._log("Reconstruindo grafo de visibilidade com obstáculos atualizados...", "info")
+        vertices = _extract_boundary_vertices(self.map_grid)
+        new_base_graph = build_visibility_graph(self.map_grid, vertices)
+        _connect_endpoint(new_base_graph, self.map_grid, self.source_point)
+        _connect_endpoint(new_base_graph, self.map_grid, self.target_point)
+
+        # Seed initial positions from the latest snapshot; any robot stuck in an
+        # obstacle cell retreats to the source to keep the search feasible.
+        initial_positions: dict[int, GridPoint] = {}
+        for robot_id, pos in self.current_positions.items():
+            if not self.map_grid.is_free(pos[0], pos[1]):
+                self._log(
+                    f"Robô r{robot_id + 1} em célula inválida {pos}; retornando à origem.",
+                    "warn",
+                )
+                initial_positions[robot_id] = self.source_point
+            else:
+                initial_positions[robot_id] = pos
+
+        # Ensure leader (id=0) exists.
+        if 0 not in initial_positions:
+            initial_positions[0] = self.source_point
+
+        # Normalize to contiguous ids starting at 0.
+        ordered_ids = sorted(initial_positions.keys())
+        remapped: dict[int, GridPoint] = {
+            new_id: initial_positions[old_id]
+            for new_id, old_id in enumerate(ordered_ids)
+        }
+
+        try:
+            cost, new_path, new_snapshots, updated_graph = reactive_replanning(
+                new_base_graph,
+                source=self.source_point,
+                target=self.target_point,
+                initial_positions=remapped,
+                obstacle_point=obstacle_point,
+                grid_obj=self.map_grid,
+                lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+                fallback_on_deadlock=True,
+            )
+        except Exception as exc:
+            self._log(f"Erro em reactive_replanning: {exc}", "error")
+            return
+
+        self.planning_graph = updated_graph
+
+        if cost == INFINITE_PATH_COST or not new_path:
+            self._log(
+                "Replanning não encontrou caminho viável após atualização do mapa.",
+                "error",
+            )
+            self._set_status("Sem caminho após obstáculo. Limpe obstáculos ou mova pontos.")
+            return
+
+        self.replanning_active = True
+        self.current_path = list(new_path)
+        self._log(
+            f"Novo plano: {len(new_path)} vertices, custo={cost:.3f}.", "info"
+        )
+        self._log(f"Path: {new_path}", "step")
+        self._install_snapshots(
+            new_snapshots,
+            f"reactive_replanning ({len(new_snapshots) - 1} movimentos)",
+        )
+        self._set_status("Replanejamento concluído. Continue a execução passo a passo.")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _is_blocked_cell(self, point: GridPoint) -> bool:
+        assert self.map_grid is not None
+        row, col = point
+        if not self.map_grid.in_bounds(row, col):
+            return True
+        return not self.map_grid.is_free(row, col)
+
+    def _on_clear_obstacles(self) -> None:
+        if self.map_grid is None or self.base_map_array is None:
+            return
+        # Restore grid to its baseline (static obstacles only).
+        self.map_grid.grid[:, :] = self.base_map_array
+        self.dynamic_obstacles.clear()
+        self._log("Obstáculos dinâmicos removidos.", "info")
+        # Rebuild base graph to reflect baseline.
+        vertices = _extract_boundary_vertices(self.map_grid)
+        self.base_vis_graph = build_visibility_graph(self.map_grid, vertices)
+        self.planning_graph = None
+        self._render()
+
+    def _on_reset_points(self) -> None:
+        self.source_point = None
+        self.target_point = None
+        self.snapshots = []
+        self.current_snapshot_index = 0
+        self.current_positions = {}
+        self.current_path = []
+        self.original_path = []
+        self.replanning_active = False
+        self._stop_playback()
+        self._log("Pontos, plano e execução resetados.", "info")
+        self.mode_var.set("source")
+        self._on_mode_change()
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Logging / status
+    # ------------------------------------------------------------------
+    def _set_status(self, message: str) -> None:
+        self.status_var.set(message)
+
+    def _log(self, message: str, level: str = "info") -> None:
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, message + "\n", level)
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _log_snapshot(self, snapshot: MovementSnapshot) -> None:
+        level = "step" if snapshot["valid"] else "warn"
+        self._log(
+            f"[step {snapshot['step']}] {snapshot['description']}", level
+        )
+
+    def _update_step_info(self) -> None:
+        if not self.snapshots:
+            self.step_info_var.set("Step: -")
+            return
+        snap = self.snapshots[self.current_snapshot_index]
+        self.step_info_var.set(
+            f"Step {self.current_snapshot_index}/{len(self.snapshots) - 1} "
+            f"(sim step={snap['step']})"
+        )
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+    def _render(self) -> None:
+        self.ax.clear()
+        if self.map_grid is None:
+            self.ax.text(
+                0.5,
+                0.5,
+                "Carregue um mapa para começar.",
+                ha="center",
+                va="center",
+                transform=self.ax.transAxes,
+                fontsize=12,
+                color="#7A7A7A",
+            )
+            self.canvas.draw_idle()
+            return
+
+        # --- occupancy grid ------------------------------------------------
+        display_grid = self.map_grid.grid.astype(np.int32).copy()
+        # Highlight dynamic obstacles with a distinct code (value 2).
+        for r, c in self.dynamic_obstacles:
+            if self.map_grid.in_bounds(r, c):
+                display_grid[r, c] = 2
+
+        cmap = mcolors.ListedColormap(
+            [FREE_SPACE_COLOR, OBSTACLE_COLOR, DYNAMIC_OBSTACLE_COLOR]
+        )
+        norm = mcolors.BoundaryNorm([0, 0.5, 1.5, 2.5], cmap.N)
+        self.ax.imshow(
+            display_grid,
+            cmap=cmap,
+            norm=norm,
+            interpolation="nearest",
+            origin="upper",
+            zorder=0,
+        )
+
+        # --- paths ---------------------------------------------------------
+        if self.original_path and self.replanning_active:
+            self._draw_path(
+                self.original_path,
+                BLOCKED_PATH_COLOR,
+                "Rota original (bloqueada)",
+                linestyle="--",
+                linewidth=1.6,
+                alpha=0.75,
+                zorder=2,
+            )
+        if self.current_path:
+            label = "Rota replanejada" if self.replanning_active else "Rota planejada"
+            color = REPLANNED_PATH_COLOR if self.replanning_active else ORIGINAL_PATH_COLOR
+            self._draw_path(
+                self.current_path, color, label, linewidth=2.4, zorder=3
+            )
+
+        # --- source / target ---------------------------------------------
+        if self.source_point is not None:
+            self._draw_point(self.source_point, SOURCE_COLOR, "Origem", "o", size=130, zorder=5)
+        if self.target_point is not None:
+            self._draw_point(self.target_point, TARGET_COLOR, "Destino", "*", size=220, zorder=5)
+
+        # --- robots --------------------------------------------------------
+        if self.current_positions:
+            for robot_id, position in self.current_positions.items():
+                color = ROBOT_PALETTE[robot_id % len(ROBOT_PALETTE)]
+                self.ax.scatter(
+                    [position[1]],
+                    [position[0]],
+                    s=180,
+                    c=color,
+                    edgecolors="black",
+                    linewidths=1.0,
+                    zorder=6,
+                )
+                self.ax.text(
+                    position[1],
+                    position[0],
+                    f"r{robot_id + 1}",
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=8,
+                    fontweight="bold",
+                    zorder=7,
+                )
+
+        # --- legend --------------------------------------------------------
+        legend_handles = [
+            mpatches.Patch(color=FREE_SPACE_COLOR, label="Livre"),
+            mpatches.Patch(color=OBSTACLE_COLOR, label="Obstáculo estático"),
+            mpatches.Patch(color=DYNAMIC_OBSTACLE_COLOR, label="Obstáculo dinâmico"),
+        ]
+        self.ax.legend(
+            handles=legend_handles,
+            loc="upper right",
+            fontsize=8,
+            framealpha=0.85,
+        )
+
+        self.ax.set_title(
+            f"Mapa: {self.map_name_var.get()} | modo clique: {self.mode_var.get()}",
+            fontsize=10,
+        )
+        self.ax.set_xlabel("col")
+        self.ax.set_ylabel("row")
+        self.ax.set_xlim(-0.5, self.map_grid.cols - 0.5)
+        self.ax.set_ylim(self.map_grid.rows - 0.5, -0.5)
+        self.canvas.draw_idle()
+
+    def _draw_path(
+        self,
+        path: list[GridPoint],
+        color: str,
+        label: str,
+        linestyle: str = "-",
+        linewidth: float = 2.0,
+        alpha: float = 1.0,
+        zorder: int = 3,
+    ) -> None:
+        if len(path) < 2:
+            return
+        rows = [p[0] for p in path]
+        cols = [p[1] for p in path]
+        self.ax.plot(
+            cols,
+            rows,
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            alpha=alpha,
+            marker="o",
+            markersize=4,
+            label=label,
+            zorder=zorder,
+        )
+
+    def _draw_point(
+        self,
+        point: GridPoint,
+        color: str,
+        label: str,
+        marker: str,
+        size: int,
+        zorder: int,
+    ) -> None:
+        self.ax.scatter(
+            [point[1]],
+            [point[0]],
+            s=size,
+            c=color,
+            marker=marker,
+            edgecolors="black",
+            linewidths=1.2,
+            zorder=zorder,
+            label=label,
+        )
+
+
+def main() -> None:
+    app = InteractiveReplannerApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

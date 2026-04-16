@@ -32,14 +32,15 @@ def _show_menu() -> None:
     print("[2] Exportar occupancy grid")
     print("[3] Exportar grafo de visibilidade")
     print("[4] Planejar caminho (interativo)")
-    print("[5] Sair")
+    print("[5] Demo interativa: ordered + reactive replanning")
+    print("[6] Sair")
 
 
 def main() -> None:
     """Entrypoint for interactive terminal menu."""
     while True:
         _show_menu()
-        choice = input("Escolha uma opcao [1-5]: ").strip().lower()
+        choice = input("Escolha uma opcao [1-6]: ").strip().lower()
 
         if choice == "1":
             exit_code = _run_script("map_editor.py")
@@ -61,11 +62,16 @@ def main() -> None:
             print(f"Planejamento finalizado com codigo: {exit_code}")
             continue
 
-        if choice in {"5", "q", "quit", "s", "sair"}:
+        if choice == "5":
+            exit_code = _run_script("interactive_replanner.py")
+            print(f"Demo interativa finalizada com codigo: {exit_code}")
+            continue
+
+        if choice in {"6", "q", "quit", "s", "sair"}:
             print("Encerrando menu.")
             return
 
-        print("Opcao invalida. Digite 1, 2, 3, 4 ou 5.")
+        print("Opcao invalida. Digite 1, 2, 3, 4, 5 ou 6.")
 
 
 if __name__ == "__main__":
