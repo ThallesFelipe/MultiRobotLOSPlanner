@@ -374,11 +374,50 @@ def extract_graph_vertices(
         gaussian_sigma=gaussian_sigma,
         nms_window_size=corner_nms_window_size,
     )
-    return cluster_points_dbscan(
+    clustered_vertices = cluster_points_dbscan(
         corner_points,
         eps=dbscan_eps,
         min_samples=dbscan_min_samples,
     )
+    return project_vertices_to_free_space(grid_obj, clustered_vertices)
+
+
+def project_vertices_to_free_space(
+    grid_obj: MapGrid,
+    vertices: Sequence[GridPoint],
+) -> list[GridPoint]:
+    """Projects extracted graph vertices onto nearest free configuration cells."""
+    if not vertices:
+        return []
+
+    free_space_mask = grid_obj.grid == FREE_SPACE_VALUE
+    if not bool(np.any(free_space_mask)):
+        return []
+
+    _, nearest_free_indices = ndimage.distance_transform_edt(
+        ~free_space_mask,
+        return_indices=True,
+    )
+
+    projected_vertices: list[GridPoint] = []
+    for vertex in vertices:
+        if not _in_bounds(vertex, free_space_mask.shape):
+            continue
+
+        if free_space_mask[vertex]:
+            projected_vertices.append(vertex)
+            continue
+
+        projected_vertex = (
+            int(nearest_free_indices[0, vertex[0], vertex[1]]),
+            int(nearest_free_indices[1, vertex[0], vertex[1]]),
+        )
+        if _in_bounds(projected_vertex, free_space_mask.shape) and free_space_mask[
+            projected_vertex
+        ]:
+            projected_vertices.append(projected_vertex)
+
+    return sorted(set(projected_vertices))
 
 
 def compute_edt_and_gradient(
@@ -685,7 +724,8 @@ class MapProcessor:
     def extract_graph_vertices(self) -> list[GridPoint]:
         """Runs full vertex extraction pipeline and returns clustered centroids."""
         corners = self.detect_corner_candidates()
-        return self.cluster_corner_candidates(corners)
+        clustered_vertices = self.cluster_corner_candidates(corners)
+        return project_vertices_to_free_space(self.grid_obj, clustered_vertices)
 
     def build_initial_visibility_graph(self) -> nx.Graph[GridPoint]:
         """Builds the initial LOS visibility graph from extracted centroids."""

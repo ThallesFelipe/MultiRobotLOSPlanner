@@ -21,6 +21,7 @@ from algorithms.relay_dijkstra import (
     DEFAULT_RELAY_PENALTY_LAMBDA,
     INFINITE_PATH_COST,
     relay_dijkstra,
+    relay_dijkstra_with_edge_cap,
 )
 from core.map_grid import GridPoint, MapGrid
 from core.visibility import bresenham
@@ -126,6 +127,7 @@ def ordered_progression(
     path: Sequence[GridPoint],
     grid_obj: MapGrid | None = None,
     vis_graph: nx.Graph[GridPoint] | None = None,
+    robot_count: int | None = None,
 ) -> list[MovementSnapshot]:
     """Generates deterministic movement snapshots for the relay chain.
 
@@ -133,6 +135,8 @@ def ordered_progression(
         path: Ordered path `[base, n1, ..., nk, goal]` selected for deployment.
         grid_obj: Occupancy grid used for midpoint LOS validation.
         vis_graph: Visibility graph used for graph-based connectivity checks.
+        robot_count: Available fleet size. When omitted, uses the minimum
+            `len(path) - 1` robots required by the path.
 
     Returns:
         A list of per-step movement snapshots.
@@ -141,7 +145,13 @@ def ordered_progression(
         return []
 
     n_nodes = len(path)
-    n_robots = n_nodes - 1
+    required_robot_count = n_nodes - 1
+    n_robots = required_robot_count if robot_count is None else robot_count
+    if n_robots < required_robot_count:
+        raise ValueError(
+            "robot_count is insufficient for path deployment: "
+            f"path requires {required_robot_count}, received {n_robots}."
+        )
 
     positions: RobotPositions = {robot_id: path[0] for robot_id in range(n_robots)}
     progress: dict[int, int] = {robot_id: 0 for robot_id in range(n_robots)}
@@ -275,6 +285,7 @@ def plan_ordered_progression_on_visibility_graph(
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
     grid_obj: MapGrid | None = None,
     prefer_fewer_relays: bool = False,
+    robot_count: int | None = None,
 ) -> OrderedPathPlanningResult:
     """Plans a visibility-graph path and expands it with ordered progression.
 
@@ -286,18 +297,30 @@ def plan_ordered_progression_on_visibility_graph(
         grid_obj: Optional occupancy grid for midpoint LOS checks.
         prefer_fewer_relays: When `True`, prioritizes paths with fewer relays
             before penalized-cost minimization.
+        robot_count: Available fleet size. Paths requiring more robots are
+            treated as infeasible.
 
     Returns:
         Planning result with the path, movement snapshots, and summary metrics.
         When no feasible path exists, the path and snapshots are empty.
     """
-    path_cost, planned_path = relay_dijkstra(
-        vis_graph,
-        source,
-        target,
-        lam=lam,
-        prefer_fewer_relays=prefer_fewer_relays,
-    )
+    if robot_count is None:
+        path_cost, planned_path = relay_dijkstra(
+            vis_graph,
+            source,
+            target,
+            lam=lam,
+            prefer_fewer_relays=prefer_fewer_relays,
+        )
+    else:
+        path_cost, planned_path = relay_dijkstra_with_edge_cap(
+            vis_graph,
+            source,
+            target,
+            lam=lam,
+            max_edges=robot_count,
+        )
+
     if path_cost == INFINITE_PATH_COST or not planned_path:
         return {
             "source": source,
@@ -313,6 +336,7 @@ def plan_ordered_progression_on_visibility_graph(
         planned_path,
         grid_obj=grid_obj,
         vis_graph=vis_graph,
+        robot_count=robot_count,
     )
     return {
         "source": source,

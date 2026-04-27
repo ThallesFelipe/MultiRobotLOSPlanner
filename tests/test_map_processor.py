@@ -9,6 +9,7 @@ from core.map_processor import (
     compute_blocked_corridor_segment,
     extract_cfree_boundaries,
 )
+from presets.map_catalog import create_map_from_catalog
 
 GridPoint = tuple[int, int]
 
@@ -66,6 +67,16 @@ def test_map_processor_corner_detection_and_dbscan_returns_centroids() -> None:
             and abs(vertex[1] - expected_corner[1]) <= 3
             for vertex in vertices
         )
+    assert all(grid.is_free(*vertex) for vertex in vertices)
+
+
+def test_map_processor_projects_bidas_vertices_to_free_space() -> None:
+    """Corner centroids used as graph vertices must not remain in obstacles."""
+    grid = create_map_from_catalog("bidas")
+    vertices = MapProcessor(grid).extract_graph_vertices()
+
+    assert vertices
+    assert all(grid.is_free(*vertex) for vertex in vertices)
 
 
 def test_map_processor_build_initial_visibility_graph_has_weighted_edges() -> None:

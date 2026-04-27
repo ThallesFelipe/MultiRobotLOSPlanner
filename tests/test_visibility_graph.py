@@ -64,6 +64,27 @@ def test_visibility_graph_out_of_bounds_vertex_has_no_edges() -> None:
     assert graph.number_of_edges() == 0
 
 
+
+def test_visibility_graph_accepts_custom_diagonal_flank_policy() -> None:
+    """Checks custom diagonal policy wiring for visibility-graph LOS checks."""
+    grid = MapGrid(3, 3)
+    grid.add_obstacle(1, 0)
+    vertices: list[GridPoint] = [(0, 0), (1, 1)]
+
+    strict_graph = build_visibility_graph(
+        grid,
+        vertices,
+        diagonal_flank_policy="either",
+    )
+    permissive_graph = build_visibility_graph(
+        grid,
+        vertices,
+        diagonal_flank_policy="both",
+    )
+
+    assert strict_graph.number_of_edges() == 0
+    assert permissive_graph.number_of_edges() == 1
+
 def test_visibility_graph_empty_vertices_returns_empty_graph() -> None:
     """Checks that an empty vertex set yields an empty visibility graph."""
     grid = MapGrid(5, 5)

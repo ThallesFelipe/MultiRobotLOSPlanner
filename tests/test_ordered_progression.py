@@ -90,6 +90,33 @@ def test_ordered_progression_reaches_expected_final_positions() -> None:
     }
 
 
+def test_ordered_progression_keeps_extra_available_robots_at_base() -> None:
+    """Available robots beyond the initial path requirement remain in the state."""
+    path: list[GridPoint] = [(0, 0), (0, 1), (0, 2), (0, 3)]
+    snapshots = ordered_progression(path, robot_count=4)
+
+    assert snapshots[0]["positions"] == {
+        0: (0, 0),
+        1: (0, 0),
+        2: (0, 0),
+        3: (0, 0),
+    }
+    assert snapshots[-1]["positions"] == {
+        0: (0, 3),
+        1: (0, 2),
+        2: (0, 1),
+        3: (0, 0),
+    }
+
+
+def test_ordered_progression_rejects_insufficient_robot_count() -> None:
+    """A path with n nodes requires at least n - 1 robots."""
+    path: list[GridPoint] = [(0, 0), (0, 1), (0, 2)]
+
+    with pytest.raises(ValueError, match="insufficient"):
+        ordered_progression(path, robot_count=1)
+
+
 def test_ordered_progression_initial_snapshot_metadata() -> None:
     """Ensures initial snapshot has stable structure and semantics."""
     path: list[GridPoint] = [(1, 1), (1, 2)]
@@ -220,3 +247,28 @@ def test_plan_ordered_progression_on_visibility_graph_handles_missing_path() -> 
     assert result["movement_snapshots"] == []
     assert result["traversed_cells"] == 0
     assert result["robots_used"] == 0
+
+
+def test_plan_ordered_progression_respects_available_robot_count() -> None:
+    """Initial planning searches for a path feasible with the configured fleet."""
+    vis_graph: nx.Graph[GridPoint] = nx.Graph()
+    vis_graph.add_weighted_edges_from(
+        [
+            ((0, 0), (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 2), (0, 3), 1.0),
+            ((0, 0), (1, 1), 3.0),
+            ((1, 1), (0, 3), 3.0),
+        ]
+    )
+
+    result = plan_ordered_progression_on_visibility_graph(
+        vis_graph,
+        source=(0, 0),
+        target=(0, 3),
+        lam=0.0,
+        robot_count=2,
+    )
+
+    assert result["path"] == [(0, 0), (1, 1), (0, 3)]
+    assert len(result["movement_snapshots"][0]["positions"]) == 2

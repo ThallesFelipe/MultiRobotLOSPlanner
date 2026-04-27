@@ -5,7 +5,11 @@ import math
 import networkx as nx
 import pytest
 
-from algorithms.relay_dijkstra import relay_dijkstra, count_relay_robots
+from algorithms.relay_dijkstra import (
+    count_relay_robots,
+    relay_dijkstra,
+    relay_dijkstra_with_edge_cap,
+)
 
 NodeName = str
 WeightedEdge = tuple[NodeName, NodeName, float]
@@ -102,6 +106,30 @@ def test_relay_dijkstra_can_prioritize_fewer_relays() -> None:
 
     assert path_fewer_relays == ["A", "C"]
     assert math.isclose(cost_fewer_relays, 5.0, rel_tol=1e-12, abs_tol=1e-12)
+
+
+def test_relay_dijkstra_with_edge_cap_chooses_feasible_alternative() -> None:
+    """Caps path segments by available robot count without dropping lambda cost."""
+    graph = _build_graph(
+        [
+            ("A", "B", 1.0),
+            ("B", "C", 1.0),
+            ("C", "D", 1.0),
+            ("A", "X", 2.0),
+            ("X", "D", 2.0),
+        ]
+    )
+
+    cost, path = relay_dijkstra_with_edge_cap(
+        graph,
+        "A",
+        "D",
+        lam=1.0,
+        max_edges=2,
+    )
+
+    assert path == ["A", "X", "D"]
+    assert math.isclose(cost, 6.0, rel_tol=1e-12, abs_tol=1e-12)
 
 
 def test_relay_dijkstra_source_equals_target() -> None:

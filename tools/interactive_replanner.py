@@ -45,14 +45,22 @@ from algorithms.ordered_progression import (
     MovementSnapshot,
     ordered_progression,
 )
+from algorithms.connectivity_checks import temporary_los_connectivity_check
 from algorithms.reactive_replanning import reactive_replanning
 from algorithms.relay_dijkstra import (
     DEFAULT_RELAY_PENALTY_LAMBDA,
     INFINITE_PATH_COST,
     relay_dijkstra,
+    relay_dijkstra_with_edge_cap,
 )
 from core.map_grid import GridPoint, MapGrid
-from core.visibility import has_line_of_sight
+from core.map_processor import MapProcessor
+from core.visibility import (
+    DEFAULT_DIAGONAL_FLANK_POLICY,
+    DiagonalFlankPolicy,
+    bresenham,
+    has_line_of_sight,
+)
 from core.visibility_graph import build_visibility_graph
 from presets.map_catalog import (
     DEFAULT_CATALOG_PATH,
@@ -60,7 +68,6 @@ from presets.map_catalog import (
     list_catalog_maps,
 )
 
-# --- Visual theme -----------------------------------------------------------
 FREE_SPACE_COLOR = "#F4F1E8"
 OBSTACLE_COLOR = "#1F2321"
 DYNAMIC_OBSTACLE_COLOR = "#8E1A1A"
@@ -84,6 +91,9 @@ DEFAULT_BOUNDARY_STRIDE = 1
 DEFAULT_MAX_VERTICES = 600
 DEFAULT_STEP_DELAY_MS = 350
 DEFAULT_OBSTACLE_RADIUS = 1
+DEFAULT_ROBOT_COUNT = 4
+DEFAULT_PLAN_PREFER_FEWER_RELAYS = False
+DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY: DiagonalFlankPolicy = DEFAULT_DIAGONAL_FLANK_POLICY
 
 
 def _euclidean_distance(p1: GridPoint, p2: GridPoint) -> float:
@@ -130,6 +140,13 @@ def _extract_boundary_vertices(
     return vertices
 
 
+def _extract_visibility_vertices(map_grid: MapGrid) -> list[GridPoint]:
+    """Extracts free visibility vertices using corners plus passage samples."""
+    corner_vertices = MapProcessor(map_grid).extract_graph_vertices()
+    passage_vertices = _extract_boundary_vertices(map_grid)
+    return sorted(set(corner_vertices) | set(passage_vertices))
+
+
 def _connect_endpoint(
     graph: nx.Graph[GridPoint],
     map_grid: MapGrid,
@@ -141,7 +158,12 @@ def _connect_endpoint(
     for candidate in list(graph.nodes):
         if candidate == endpoint:
             continue
-        if not has_line_of_sight(map_grid, endpoint, candidate):
+        if not has_line_of_sight(
+            map_grid,
+            endpoint,
+            candidate,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        ):
             continue
         if not graph.has_edge(endpoint, candidate):
             graph.add_edge(
@@ -160,11 +182,11 @@ class InteractiveReplannerApp(tk.Tk):
         self.geometry("1500x900")
         self.minsize(1200, 760)
 
-        # --- State ---------------------------------------------------------
         self.catalog_path: Path = DEFAULT_CATALOG_PATH
         self.map_grid: MapGrid | None = None
         self.base_map_array: np.ndarray | None = None
         self.dynamic_obstacles: set[GridPoint] = set()
+        self.pending_obstacle_events: list[tuple[set[GridPoint], GridPoint]] = []
 
         self.source_point: GridPoint | None = None
         self.target_point: GridPoint | None = None
@@ -180,12 +202,11 @@ class InteractiveReplannerApp(tk.Tk):
         self.current_positions: dict[int, GridPoint] = {}
         self.n_robots: int = 0
 
-        self.click_mode: str = "source"  # 'source', 'target', 'obstacle'
+        self.click_mode: str = "source"
         self.playing: bool = False
         self.play_job: str | None = None
         self.replanning_active: bool = False
 
-        # --- Tk variables --------------------------------------------------
         self.map_name_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="source")
         self.status_var = tk.StringVar(
@@ -194,13 +215,11 @@ class InteractiveReplannerApp(tk.Tk):
         self.step_info_var = tk.StringVar(value="Step: -")
         self.speed_var = tk.IntVar(value=DEFAULT_STEP_DELAY_MS)
         self.obstacle_radius_var = tk.IntVar(value=DEFAULT_OBSTACLE_RADIUS)
+        self.robot_count_var = tk.IntVar(value=DEFAULT_ROBOT_COUNT)
 
         self._build_layout()
         self._refresh_map_list()
 
-    # ------------------------------------------------------------------
-    # Layout
-    # ------------------------------------------------------------------
     def _build_layout(self) -> None:
         top = ttk.Frame(self, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
@@ -237,6 +256,15 @@ class InteractiveReplannerApp(tk.Tk):
             from_=0,
             to=10,
             textvariable=self.obstacle_radius_var,
+            width=4,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(top, text="Robôs:").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Spinbox(
+            top,
+            from_=1,
+            to=20,
+            textvariable=self.robot_count_var,
             width=4,
         ).pack(side=tk.LEFT)
 
@@ -283,15 +311,12 @@ class InteractiveReplannerApp(tk.Tk):
             side=tk.LEFT, padx=2
         )
 
-        # --- Body: canvas + side log --------------------------------------
         body = ttk.Frame(self)
         body.pack(fill=tk.BOTH, expand=True)
 
         canvas_frame = ttk.Frame(body)
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Matplotlib type stubs are incomplete for strict Pylance settings.
-        # We keep runtime behavior unchanged and cast plotting objects.
         self.figure: Any = Figure(figsize=(9, 7), dpi=100)
         self.ax: Any = self.figure.add_subplot(111)
         self.ax.set_facecolor(FREE_SPACE_COLOR)
@@ -336,13 +361,10 @@ class InteractiveReplannerApp(tk.Tk):
             fill=tk.X
         )
 
-    # ------------------------------------------------------------------
-    # Map loading
-    # ------------------------------------------------------------------
     def _refresh_map_list(self) -> None:
         try:
             maps = list_catalog_maps(self.catalog_path)
-        except Exception as exc:  # pragma: no cover - defensive UI path
+        except Exception as exc:
             messagebox.showerror("Catálogo", f"Falha ao ler catálogo: {exc}")
             maps = []
         self.map_combo["values"] = maps
@@ -364,6 +386,7 @@ class InteractiveReplannerApp(tk.Tk):
         self.map_grid = map_grid
         self.base_map_array = map_grid.grid.astype(np.int32).copy()
         self.dynamic_obstacles.clear()
+        self.pending_obstacle_events.clear()
         self.source_point = None
         self.target_point = None
         self.snapshots = []
@@ -377,9 +400,16 @@ class InteractiveReplannerApp(tk.Tk):
         self._log(f"Mapa '{map_name}' carregado ({map_grid.rows}x{map_grid.cols}).", "info")
         self._set_status("Mapa carregado. Clique no mapa para definir origem e destino.")
 
-        self._log("Construindo grafo de visibilidade (vertices de borda)...", "info")
-        vertices = _extract_boundary_vertices(map_grid)
-        self.base_vis_graph = build_visibility_graph(map_grid, vertices)
+        self._log(
+            "Construindo grafo de visibilidade (Canny/cantos/DBSCAN + passagens livres)...",
+            "info",
+        )
+        vertices = _extract_visibility_vertices(map_grid)
+        self.base_vis_graph = build_visibility_graph(
+            map_grid,
+            vertices,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        )
         self._log(
             f"Grafo base: {self.base_vis_graph.number_of_nodes()} vertices, "
             f"{self.base_vis_graph.number_of_edges()} arestas.",
@@ -390,9 +420,6 @@ class InteractiveReplannerApp(tk.Tk):
         self.mode_var.set("source")
         self._render()
 
-    # ------------------------------------------------------------------
-    # Click dispatch
-    # ------------------------------------------------------------------
     def _on_mode_change(self) -> None:
         self.click_mode = self.mode_var.get()
         self._set_status(
@@ -464,7 +491,7 @@ class InteractiveReplannerApp(tk.Tk):
         if not new_cells:
             return
 
-        # Mark obstacles on grid + base_map_array
+        inserted_cells: set[GridPoint] = set()
         for cell in new_cells:
             if cell in self.dynamic_obstacles:
                 continue
@@ -473,23 +500,106 @@ class InteractiveReplannerApp(tk.Tk):
                 self.map_grid.add_obstacle(cell[0], cell[1])
             except ValueError:
                 continue
+            inserted_cells.add(cell)
+
+        if not inserted_cells:
+            return
 
         self._log(
             f"Obstáculo dinâmico inserido em {point} (raio={radius}, "
-            f"{len(new_cells)} células).",
+            f"{len(inserted_cells)} células).",
             "warn",
         )
         self._render()
 
-        # Decide whether replanning is needed.
-        if self.snapshots and self.current_positions and self.current_path:
-            self._maybe_trigger_replanning(point)
+        if self.current_path:
+            self._maybe_trigger_replanning(inserted_cells, point)
 
-    # ------------------------------------------------------------------
-    # Planning
-    # ------------------------------------------------------------------
+    def _count_blocked_steps(self, snapshots: list[MovementSnapshot]) -> int:
+        """Counts blocked movement attempts, excluding the initial snapshot."""
+        return sum(
+            1
+            for snapshot in snapshots[1:]
+            if not snapshot["valid"]
+        )
+
+    def _count_valid_robot_moves(self, snapshots: list[MovementSnapshot]) -> int:
+        """Counts effective robot displacements, excluding blocked attempts."""
+        return sum(
+            1
+            for snapshot in snapshots[1:]
+            if snapshot["valid"] and snapshot["robot_id"] is not None
+        )
+
+    def _selected_robot_count(self) -> int:
+        """Returns the configured fleet size for planning and replanning."""
+        return max(1, int(self.robot_count_var.get()))
+
+    def _build_plan_candidate(
+        self,
+        planning_graph: nx.Graph[GridPoint],
+        prefer_fewer_relays: bool,
+    ) -> tuple[float, list[GridPoint], list[MovementSnapshot], int] | None:
+        """Builds one planning candidate and scores it by blocked steps."""
+        assert self.source_point is not None and self.target_point is not None
+        assert self.map_grid is not None
+
+        robot_count = self._selected_robot_count()
+        if prefer_fewer_relays:
+            cost, path = relay_dijkstra(
+                planning_graph,
+                self.source_point,
+                self.target_point,
+                lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+                prefer_fewer_relays=True,
+            )
+            if len(path) - 1 > robot_count:
+                cost, path = INFINITE_PATH_COST, []
+        else:
+            cost, path = relay_dijkstra_with_edge_cap(
+                planning_graph,
+                self.source_point,
+                self.target_point,
+                lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+                max_edges=robot_count,
+            )
+        if cost == INFINITE_PATH_COST or not path:
+            return None
+
+        snapshots = ordered_progression(
+            path,
+            grid_obj=self.map_grid,
+            vis_graph=planning_graph,
+            robot_count=robot_count,
+        )
+        blocked_steps = self._count_blocked_steps(snapshots)
+        return cost, list(path), snapshots, blocked_steps
+
+    def _build_planning_graph_for_current_map(
+        self,
+        extra_vertices: set[GridPoint] | None = None,
+    ) -> nx.Graph[GridPoint]:
+        """Builds a planning graph from the current occupancy map state."""
+        assert self.map_grid is not None
+
+        vertices = _extract_visibility_vertices(self.map_grid)
+        if extra_vertices:
+            vertices = sorted(set(vertices) | set(extra_vertices))
+        planning_graph = build_visibility_graph(
+            self.map_grid,
+            vertices,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        )
+
+        if self.source_point is not None:
+            _connect_endpoint(planning_graph, self.map_grid, self.source_point)
+        if self.target_point is not None:
+            _connect_endpoint(planning_graph, self.map_grid, self.target_point)
+
+        return planning_graph
+
     def _on_plan(self) -> None:
-        if self.map_grid is None or self.base_vis_graph is None:
+        if self.map_grid is None:
             messagebox.showwarning("Planejar", "Carregue um mapa primeiro.")
             return
         if self.source_point is None or self.target_point is None:
@@ -499,23 +609,24 @@ class InteractiveReplannerApp(tk.Tk):
             return
 
         self._stop_playback()
+        self.pending_obstacle_events.clear()
         self._log(
             "=== Planejamento inicial (ordered_progression) ===", "info"
         )
+        self._log(
+            "Construindo grafo para o estado atual do mapa (inclui obstáculos dinâmicos).",
+            "info",
+        )
 
-        planning_graph = self.base_vis_graph.copy()
-        _connect_endpoint(planning_graph, self.map_grid, self.source_point)
-        _connect_endpoint(planning_graph, self.map_grid, self.target_point)
+        planning_graph = self._build_planning_graph_for_current_map()
         self.planning_graph = planning_graph
 
-        cost, path = relay_dijkstra(
+        candidate = self._build_plan_candidate(
             planning_graph,
-            self.source_point,
-            self.target_point,
-            lam=DEFAULT_RELAY_PENALTY_LAMBDA,
-            prefer_fewer_relays=True,
+            prefer_fewer_relays=False,
         )
-        if cost == INFINITE_PATH_COST or not path:
+
+        if candidate is None:
             self._log("Nenhum caminho viável encontrado.", "error")
             self._set_status("Sem caminho. Altere pontos ou limpe obstáculos.")
             self.snapshots = []
@@ -524,21 +635,26 @@ class InteractiveReplannerApp(tk.Tk):
             self._render()
             return
 
+        cost, path, snapshots, blocked_steps = candidate
+
         self.original_path = list(path)
         self.current_path = list(path)
         self.replanning_active = False
 
+        self._log("Plano escolhido: menor custo distância + lambda.", "info")
         self._log(
             f"Caminho encontrado: {len(path)} vertices, custo={cost:.3f}.",
             "info",
         )
         self._log(f"Caminho: {path}", "step")
 
-        snapshots = ordered_progression(
-            path,
-            grid_obj=self.map_grid,
-            vis_graph=planning_graph,
-        )
+        if blocked_steps > 0:
+            self._log(
+                f"Atenção: plano escolhido ainda possui {blocked_steps} bloqueio(s) "
+                "no ordered_progression.",
+                "warn",
+            )
+
         self._install_snapshots(snapshots, f"ordered_progression ({len(snapshots) - 1} movimentos)")
 
     def _install_snapshots(self, snapshots: list[MovementSnapshot], label: str) -> None:
@@ -556,9 +672,6 @@ class InteractiveReplannerApp(tk.Tk):
         self._update_step_info()
         self._render()
 
-    # ------------------------------------------------------------------
-    # Playback controls
-    # ------------------------------------------------------------------
     def _on_play_pause(self) -> None:
         if not self.snapshots:
             return
@@ -567,7 +680,21 @@ class InteractiveReplannerApp(tk.Tk):
         else:
             self._start_playback()
 
+    def _has_terminal_failure(self) -> bool:
+        """Returns whether the installed schedule ended with mission failure."""
+        if not self.snapshots:
+            return False
+
+        final_snapshot = self.snapshots[-1]
+        return (
+            final_snapshot["robot_id"] is None
+            and not final_snapshot["valid"]
+            and final_snapshot["description"].startswith("Missão interrompida:")
+        )
+
     def _start_playback(self) -> None:
+        if self._has_terminal_failure() and self.current_snapshot_index >= len(self.snapshots) - 1:
+            return
         if self.current_snapshot_index >= len(self.snapshots) - 1:
             self.current_snapshot_index = 0
             self._apply_current_snapshot()
@@ -608,8 +735,13 @@ class InteractiveReplannerApp(tk.Tk):
     def _on_last(self) -> None:
         if not self.snapshots:
             return
-        self.current_snapshot_index = len(self.snapshots) - 1
-        self._apply_current_snapshot()
+        while self.current_snapshot_index < len(self.snapshots) - 1:
+            previous_index = self.current_snapshot_index
+            self._on_next()
+            if self.current_snapshot_index == previous_index:
+                break
+            if self._has_terminal_failure():
+                break
 
     def _on_prev(self) -> None:
         if not self.snapshots or self.current_snapshot_index <= 0:
@@ -622,6 +754,13 @@ class InteractiveReplannerApp(tk.Tk):
             return
         if self.current_snapshot_index >= len(self.snapshots) - 1:
             return
+
+        next_snapshot = self.snapshots[self.current_snapshot_index + 1]
+        blocked_point = self._leader_runtime_blocking_point(next_snapshot)
+        if blocked_point is not None:
+            self._handle_leader_runtime_block(next_snapshot, blocked_point)
+            return
+
         self.current_snapshot_index += 1
         self._apply_current_snapshot()
 
@@ -631,89 +770,341 @@ class InteractiveReplannerApp(tk.Tk):
         self._log_snapshot(snapshot)
         self._update_step_info()
         self._render()
+        self._check_pending_obstacles_for_leader()
 
-    # ------------------------------------------------------------------
-    # Reactive replanning
-    # ------------------------------------------------------------------
-    def _maybe_trigger_replanning(self, obstacle_point: GridPoint) -> None:
-        """Checks if current path is invalidated by new obstacle and replans."""
+    def _leader_runtime_blocking_point(
+        self,
+        snapshot: MovementSnapshot,
+    ) -> GridPoint | None:
+        """Detects a blocked leader advance before applying a stale snapshot."""
+        if self.map_grid is None or self.source_point is None:
+            return None
+        if snapshot["robot_id"] != 0 or not snapshot["valid"]:
+            return None
+        if snapshot["from_pos"] is None or snapshot["to_pos"] is None:
+            return None
+        if snapshot["from_pos"] == snapshot["to_pos"]:
+            return None
+
+        from_pos = snapshot["from_pos"]
+        to_pos = snapshot["to_pos"]
+        segment_cells = list(bresenham(from_pos[0], from_pos[1], to_pos[0], to_pos[1]))
+
+        for cell in segment_cells[1:]:
+            if not self.map_grid.in_bounds(*cell):
+                return cell
+            if not self.map_grid.is_free(*cell):
+                return cell
+
+        if not has_line_of_sight(
+            self.map_grid,
+            from_pos,
+            to_pos,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        ):
+            return to_pos
+
+        simulated_positions = dict(self.current_positions)
+        simulated_positions[0] = to_pos
+        if not temporary_los_connectivity_check(
+            self.map_grid,
+            list(simulated_positions.values()),
+            self.source_point,
+        ):
+            return to_pos
+
+        return None
+
+    def _handle_leader_runtime_block(
+        self,
+        snapshot: MovementSnapshot,
+        obstacle_point: GridPoint,
+    ) -> None:
+        """Stops the old plan when the leader's next attempted advance fails."""
+        self._log(
+            "Líder tentou avançar "
+            f"{snapshot['from_pos']}->{snapshot['to_pos']} e encontrou bloqueio "
+            f"em {obstacle_point}. Disparando reactive_replanning.",
+            "warn",
+        )
+        self._set_status("Líder encontrou obstáculo. Replanejamento reativo em execução...")
+        self._stop_playback()
+        self.pending_obstacle_events.clear()
+        self._trigger_reactive_replanning(obstacle_point)
+
+    def _halt_execution_at_current_state(
+        self,
+        description: str,
+        status_message: str,
+    ) -> None:
+        """Stops execution and replaces future snapshots with a terminal failure."""
+        self._stop_playback()
+        self.pending_obstacle_events.clear()
+
+        current_step = 0
+        retained_snapshots: list[MovementSnapshot] = []
+        if self.snapshots:
+            current_index = min(self.current_snapshot_index, len(self.snapshots) - 1)
+            retained_snapshots = list(self.snapshots[: current_index + 1])
+            current_step = int(retained_snapshots[-1]["step"])
+
+        failure_snapshot: MovementSnapshot = {
+            "step": current_step + 1,
+            "robot_id": None,
+            "from_pos": None,
+            "to_pos": None,
+            "positions": dict(self.current_positions),
+            "valid": False,
+            "description": description,
+        }
+
+        self.snapshots = [*retained_snapshots, failure_snapshot]
+        self.current_snapshot_index = len(self.snapshots) - 1
+        self.replanning_active = True
+        self._log_snapshot(failure_snapshot)
+        self._set_status(status_message)
+        self._update_step_info()
+        self._render()
+
+    def _leader_next_path_vertex(self) -> GridPoint | None:
+        """Returns the next path vertex the leader is trying to reach."""
+        if not self.current_path:
+            return None
+
+        leader_position = self.current_positions.get(0, self.current_path[0])
+        if leader_position not in self.current_path:
+            return None
+
+        leader_index = self.current_path.index(leader_position)
+        if leader_index + 1 >= len(self.current_path):
+            return None
+        return self.current_path[leader_index + 1]
+
+    def _leader_detected_obstacle_point(
+        self,
+        obstacle_cells: set[GridPoint],
+        fallback_obstacle_point: GridPoint,
+    ) -> GridPoint | None:
+        """Returns the obstacle point only if it blocks the leader's next edge."""
         assert self.map_grid is not None
 
         if not self.current_path:
-            return
+            return None
 
-        # Check whether any edge of the current path has been broken.
-        broken = False
-        for i in range(len(self.current_path) - 1):
-            p1, p2 = self.current_path[i], self.current_path[i + 1]
-            if not has_line_of_sight(self.map_grid, p1, p2):
-                broken = True
-                break
+        leader_position = self.current_positions.get(0, self.current_path[0])
+        leader_next_vertex = self._leader_next_path_vertex()
+        if leader_next_vertex is None:
+            return None
 
-        if not broken:
+        leader_edge_cells = set(
+            bresenham(
+                leader_position[0],
+                leader_position[1],
+                leader_next_vertex[0],
+                leader_next_vertex[1],
+            )
+        )
+        intersecting_cells = sorted(leader_edge_cells & obstacle_cells)
+        if intersecting_cells:
+            return intersecting_cells[0]
+
+        if not has_line_of_sight(
+            self.map_grid,
+            leader_position,
+            leader_next_vertex,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        ):
+            return fallback_obstacle_point
+
+        return None
+
+    def _maybe_trigger_replanning(
+        self,
+        obstacle_cells: set[GridPoint],
+        fallback_obstacle_point: GridPoint,
+    ) -> bool:
+        """Registers obstacle cells until a leader movement actually hits them."""
+        assert self.map_grid is not None
+
+        detected_point = self._leader_detected_obstacle_point(
+            obstacle_cells,
+            fallback_obstacle_point,
+        )
+        if detected_point is None:
             self._log(
-                "Obstáculo não bloqueia o caminho atual; execução continua.",
+                "Obstáculo registrado, mas ainda não foi encontrado pelo líder.",
                 "info",
             )
+        else:
+            self._log(
+                "Obstáculo registrado no próximo corredor do líder; "
+                "o replanejamento será disparado quando ele tentar avançar.",
+                "warn",
+            )
+
+        self.pending_obstacle_events.append(
+            (set(obstacle_cells), fallback_obstacle_point)
+        )
+        return False
+
+    def _check_pending_obstacles_for_leader(self) -> None:
+        """Keeps deferred obstacles registered for runtime leader validation."""
+        if not self.pending_obstacle_events or self.map_grid is None:
             return
 
-        self._log(
-            "!!! Caminho atual bloqueado pelo novo obstáculo. Disparando reactive_replanning.",
-            "warn",
+    def _positions_connected_via_graph(
+        self,
+        occupied_positions: set[GridPoint],
+        connectivity_graph: nx.Graph[GridPoint],
+        base: GridPoint,
+    ) -> bool:
+        """Checks whether occupied nodes stay connected to base in a graph."""
+        if not occupied_positions:
+            return True
+        if base not in connectivity_graph:
+            return False
+
+        allowed_nodes = occupied_positions | {base}
+        reachable: set[GridPoint] = {base}
+        queue: list[GridPoint] = [base]
+
+        while queue:
+            node = queue.pop(0)
+            for neighbor in connectivity_graph.neighbors(node):
+                if neighbor not in allowed_nodes or neighbor in reachable:
+                    continue
+                reachable.add(neighbor)
+                queue.append(neighbor)
+
+        return occupied_positions.issubset(reachable)
+
+    def _connected_robot_ids_via_graph(
+        self,
+        positions: dict[int, GridPoint],
+        connectivity_graph: nx.Graph[GridPoint],
+        base: GridPoint,
+    ) -> set[int]:
+        """Returns robot ids whose occupied positions are connected to base."""
+        if not positions:
+            return set()
+        if base not in connectivity_graph:
+            return set()
+
+        allowed_nodes = set(positions.values()) | {base}
+        reachable_nodes: set[GridPoint] = {base}
+        queue: list[GridPoint] = [base]
+
+        while queue:
+            node = queue.pop(0)
+            for neighbor in connectivity_graph.neighbors(node):
+                if neighbor not in allowed_nodes or neighbor in reachable_nodes:
+                    continue
+                reachable_nodes.add(neighbor)
+                queue.append(neighbor)
+
+        return {
+            robot_id
+            for robot_id, position in positions.items()
+            if position in reachable_nodes
+        }
+
+    def _disconnected_robot_ids_via_graph(
+        self,
+        positions: dict[int, GridPoint],
+        connectivity_graph: nx.Graph[GridPoint],
+        base: GridPoint,
+    ) -> set[int]:
+        """Returns robot ids that are not connected to base."""
+        connected_ids = self._connected_robot_ids_via_graph(
+            positions,
+            connectivity_graph,
+            base,
         )
-        self._set_status("Replanejamento reativo em execução...")
-        self._stop_playback()
-        self._trigger_reactive_replanning(obstacle_point)
+        return set(positions) - connected_ids
+
+    def _spread_overlapping_positions(
+        self,
+        positions: dict[int, GridPoint],
+        connectivity_graph: nx.Graph[GridPoint],
+        base: GridPoint,
+    ) -> dict[int, GridPoint]:
+        """Compatibility shim: current robot positions are never redistributed."""
+        return dict(positions)
 
     def _trigger_reactive_replanning(self, obstacle_point: GridPoint) -> None:
         """Rebuilds the visibility graph and runs reactive_replanning."""
         assert self.map_grid is not None
         assert self.source_point is not None and self.target_point is not None
 
-        # Rebuild visibility graph using updated grid (dynamic obstacles are live).
         self._log("Reconstruindo grafo de visibilidade com obstáculos atualizados...", "info")
-        vertices = _extract_boundary_vertices(self.map_grid)
-        new_base_graph = build_visibility_graph(self.map_grid, vertices)
-        _connect_endpoint(new_base_graph, self.map_grid, self.source_point)
-        _connect_endpoint(new_base_graph, self.map_grid, self.target_point)
+        new_base_graph = self._build_planning_graph_for_current_map(
+            extra_vertices={obstacle_point}
+        )
 
-        # Seed initial positions from the latest snapshot; any robot stuck in an
-        # obstacle cell retreats to the source to keep the search feasible.
         initial_positions: dict[int, GridPoint] = {}
         for robot_id, pos in self.current_positions.items():
             if not self.map_grid.is_free(pos[0], pos[1]):
                 self._log(
-                    f"Robô r{robot_id + 1} em célula inválida {pos}; retornando à origem.",
-                    "warn",
+                    f"Robô r{robot_id + 1} está em célula inválida {pos}; "
+                    "replanning abortado sem reposicionamento artificial.",
+                    "error",
                 )
-                initial_positions[robot_id] = self.source_point
-            else:
-                initial_positions[robot_id] = pos
+                self._halt_execution_at_current_state(
+                    (
+                        "Missão interrompida: robô em célula ocupada após "
+                        "detecção de obstáculo; nenhum reposicionamento "
+                        "artificial foi executado."
+                    ),
+                    "Replanning inviável: robô em célula ocupada.",
+                )
+                return
+            initial_positions[robot_id] = pos
 
-        # Ensure leader (id=0) exists.
         if 0 not in initial_positions:
             initial_positions[0] = self.source_point
 
-        # Normalize to contiguous ids starting at 0.
-        ordered_ids = sorted(initial_positions.keys())
-        remapped: dict[int, GridPoint] = {
-            new_id: initial_positions[old_id]
-            for new_id, old_id in enumerate(ordered_ids)
-        }
+        expected_ids = set(range(len(initial_positions)))
+        if set(initial_positions) != expected_ids:
+            self._log(
+                "IDs de robôs não são contíguos; replanning abortado sem remapeamento.",
+                "error",
+            )
+            self._halt_execution_at_current_state(
+                (
+                    "Missão interrompida: IDs de robôs não contíguos; "
+                    "nenhum remapeamento artificial foi executado."
+                ),
+                "Replanning inviável: IDs de robôs não contíguos.",
+            )
+            return
+
+        if len(set(initial_positions.values())) != len(initial_positions):
+            self._log(
+                "Posições sobrepostas preservadas; nenhum robô será redistribuído "
+                "artificialmente antes do replanning.",
+                "warn",
+            )
 
         try:
             cost, new_path, new_snapshots, updated_graph = reactive_replanning(
                 new_base_graph,
                 source=self.source_point,
                 target=self.target_point,
-                initial_positions=remapped,
+                initial_positions=initial_positions,
                 obstacle_point=obstacle_point,
                 grid_obj=self.map_grid,
                 lam=DEFAULT_RELAY_PENALTY_LAMBDA,
-                fallback_on_deadlock=True,
+                fallback_on_deadlock=False,
+                prefer_fewer_relays=False,
+                allow_additional_relays=False,
+                record_blocked_attempts=False,
             )
         except Exception as exc:
             self._log(f"Erro em reactive_replanning: {exc}", "error")
+            self._halt_execution_at_current_state(
+                f"Missão interrompida: erro em reactive_replanning ({exc}).",
+                "Replanning falhou; execução interrompida.",
+            )
             return
 
         self.planning_graph = updated_graph
@@ -723,7 +1114,14 @@ class InteractiveReplannerApp(tk.Tk):
                 "Replanning não encontrou caminho viável após atualização do mapa.",
                 "error",
             )
-            self._set_status("Sem caminho após obstáculo. Limpe obstáculos ou mova pontos.")
+            self._halt_execution_at_current_state(
+                (
+                    "Missão interrompida: sem caminho viável após o obstáculo "
+                    "encontrado pelo líder. Nenhum movimento antigo será "
+                    "executado."
+                ),
+                "Sem caminho após obstáculo. Execução interrompida.",
+            )
             return
 
         self.replanning_active = True
@@ -732,15 +1130,13 @@ class InteractiveReplannerApp(tk.Tk):
             f"Novo plano: {len(new_path)} vertices, custo={cost:.3f}.", "info"
         )
         self._log(f"Path: {new_path}", "step")
+        effective_moves = self._count_valid_robot_moves(new_snapshots)
         self._install_snapshots(
             new_snapshots,
-            f"reactive_replanning ({len(new_snapshots) - 1} movimentos)",
+            f"reactive_replanning ({effective_moves} movimentos)",
         )
         self._set_status("Replanejamento concluído. Continue a execução passo a passo.")
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _is_blocked_cell(self, point: GridPoint) -> bool:
         assert self.map_grid is not None
         row, col = point
@@ -751,13 +1147,16 @@ class InteractiveReplannerApp(tk.Tk):
     def _on_clear_obstacles(self) -> None:
         if self.map_grid is None or self.base_map_array is None:
             return
-        # Restore grid to its baseline (static obstacles only).
         self.map_grid.grid[:, :] = self.base_map_array
         self.dynamic_obstacles.clear()
+        self.pending_obstacle_events.clear()
         self._log("Obstáculos dinâmicos removidos.", "info")
-        # Rebuild base graph to reflect baseline.
-        vertices = _extract_boundary_vertices(self.map_grid)
-        self.base_vis_graph = build_visibility_graph(self.map_grid, vertices)
+        vertices = _extract_visibility_vertices(self.map_grid)
+        self.base_vis_graph = build_visibility_graph(
+            self.map_grid,
+            vertices,
+            diagonal_flank_policy=DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY,
+        )
         self.planning_graph = None
         self._render()
 
@@ -770,15 +1169,13 @@ class InteractiveReplannerApp(tk.Tk):
         self.current_path = []
         self.original_path = []
         self.replanning_active = False
+        self.pending_obstacle_events.clear()
         self._stop_playback()
         self._log("Pontos, plano e execução resetados.", "info")
         self.mode_var.set("source")
         self._on_mode_change()
         self._render()
 
-    # ------------------------------------------------------------------
-    # Logging / status
-    # ------------------------------------------------------------------
     def _set_status(self, message: str) -> None:
         self.status_var.set(message)
 
@@ -804,9 +1201,6 @@ class InteractiveReplannerApp(tk.Tk):
             f"(sim step={snap['step']})"
         )
 
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
     def _render(self) -> None:
         self.ax.clear()
         if self.map_grid is None:
@@ -823,9 +1217,7 @@ class InteractiveReplannerApp(tk.Tk):
             self.canvas.draw_idle()
             return
 
-        # --- occupancy grid ------------------------------------------------
         display_grid = self.map_grid.grid.astype(np.int32).copy()
-        # Highlight dynamic obstacles with a distinct code (value 2).
         for r, c in self.dynamic_obstacles:
             if self.map_grid.in_bounds(r, c):
                 display_grid[r, c] = 2
@@ -843,7 +1235,6 @@ class InteractiveReplannerApp(tk.Tk):
             zorder=0,
         )
 
-        # --- paths ---------------------------------------------------------
         if self.original_path and self.replanning_active:
             self._draw_path(
                 self.original_path,
@@ -861,13 +1252,11 @@ class InteractiveReplannerApp(tk.Tk):
                 self.current_path, color, label, linewidth=2.4, zorder=3
             )
 
-        # --- source / target ---------------------------------------------
         if self.source_point is not None:
             self._draw_point(self.source_point, SOURCE_COLOR, "Origem", "o", size=130, zorder=5)
         if self.target_point is not None:
             self._draw_point(self.target_point, TARGET_COLOR, "Destino", "*", size=220, zorder=5)
 
-        # --- robots --------------------------------------------------------
         if self.current_positions:
             for robot_id, position in self.current_positions.items():
                 color = ROBOT_PALETTE[robot_id % len(ROBOT_PALETTE)]
@@ -892,7 +1281,6 @@ class InteractiveReplannerApp(tk.Tk):
                     zorder=7,
                 )
 
-        # --- legend --------------------------------------------------------
         legend_handles = [
             mpatches.Patch(color=FREE_SPACE_COLOR, label="Livre"),
             mpatches.Patch(color=OBSTACLE_COLOR, label="Obstáculo estático"),

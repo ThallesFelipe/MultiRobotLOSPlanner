@@ -11,7 +11,11 @@ import networkx as nx
 import numpy as np
 
 from .map_grid import GridPoint, MapGrid
-from .visibility import has_line_of_sight
+from .visibility import (
+    DEFAULT_DIAGONAL_FLANK_POLICY,
+    DiagonalFlankPolicy,
+    has_line_of_sight,
+)
 
 # Node attribute name that stores plotting coordinates (x, y).
 NODE_POSITION_ATTRIBUTE: str = "pos"
@@ -20,12 +24,14 @@ NODE_POSITION_ATTRIBUTE: str = "pos"
 def build_visibility_graph(
     grid: MapGrid,
     vertices: Sequence[GridPoint] | None,
+    diagonal_flank_policy: DiagonalFlankPolicy = DEFAULT_DIAGONAL_FLANK_POLICY,
 ) -> nx.Graph[GridPoint]:
     """Builds a LOS-constrained visibility graph from occupancy-grid vertices.
 
     Args:
         grid: Occupancy grid with `C_free` and `C_obs` cells.
         vertices: Candidate visibility-graph vertices as `(row, col)` tuples.
+        diagonal_flank_policy: Corner-cutting policy used during LOS checks.
 
     Returns:
         An undirected weighted visibility graph. Every included edge has a
@@ -50,7 +56,12 @@ def build_visibility_graph(
                 vertices[source_index],
                 vertices[target_index],
             )
-            if has_line_of_sight(grid, source_vertex, target_vertex):
+            if has_line_of_sight(
+                grid,
+                source_vertex,
+                target_vertex,
+                diagonal_flank_policy=diagonal_flank_policy,
+            ):
                 euclidean_distance = float(
                     np.hypot(
                     target_vertex[0] - source_vertex[0],

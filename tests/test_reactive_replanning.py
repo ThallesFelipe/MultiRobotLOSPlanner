@@ -67,6 +67,23 @@ def test_update_graph_with_blocked_segment_removes_only_intersections() -> None:
     assert updated_graph.has_edge((0, 0), (0, 2)) is True
 
 
+def test_update_graph_with_blocked_segment_uses_signed_direction_filter() -> None:
+    """Preserves intersecting edges whose orientation points opposite travel."""
+    graph: nx.Graph[GridPoint] = nx.Graph()
+    graph.add_edge((2, 1), (0, 1), weight=2.0)
+    graph.add_edge((0, 2), (2, 2), weight=2.0)
+
+    updated_graph = update_graph_with_blocked_segment(
+        graph,
+        blocked_segment=((1, 0), (1, 3)),
+        path_direction=(1.0, 0.0),
+        direction_dot_threshold=0.0,
+    )
+
+    assert updated_graph.has_edge((2, 1), (0, 1)) is True
+    assert updated_graph.has_edge((0, 2), (2, 2)) is False
+
+
 def test_reactive_replan_moves_leader_to_goal() -> None:
     """Validates Algorithm 1 progression along a feasible replanned path."""
     graph = _build_graph(
@@ -91,6 +108,86 @@ def test_reactive_replan_moves_leader_to_goal() -> None:
         snapshot["valid"]
         for snapshot in snapshots
         if snapshot["robot_id"] is not None
+    )
+
+
+def test_reactive_replan_rejects_partial_connectivity_recovery() -> None:
+    """Does not repair a disconnected leader by ignoring full-chain LOS."""
+    graph = _build_graph(
+        [
+            ((0, 0), (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 2), (0, 3), 1.0),
+        ]
+    )
+    path_new: list[GridPoint] = [(0, 0), (0, 1), (0, 2), (0, 3)]
+    initial_positions: RobotPositions = {
+        0: (0, 3),
+        1: (0, 0),
+        2: (0, 0),
+    }
+
+    snapshots = reactive_replan(
+        graph,
+        path_new,
+        initial_positions,
+        fallback_on_deadlock=False,
+        frozen_robot_ids={0},
+        stop_when_robot_connected_to_base=0,
+        required_connected_robot_ids={1, 2},
+    )
+
+    assert snapshots
+    assert all(snapshot["positions"][0] == (0, 3) for snapshot in snapshots)
+    assert snapshots[-1]["valid"] is False
+    assert "Deadlock detected" in snapshots[-1]["description"]
+    assert not any(snapshot["valid"] for snapshot in snapshots[1:])
+
+
+def test_reactive_replan_can_wait_for_multiple_robot_reconnections() -> None:
+    """Keeps recovery active until all requested disconnected robots reconnect."""
+    base: GridPoint = (0, 0)
+    intermediate: GridPoint = (0, 1)
+    leader: GridPoint = (0, 2)
+    isolated_start: GridPoint = (1, 1)
+    isolated_bridge: GridPoint = (1, 0)
+
+    graph = _build_graph(
+        [
+            (base, intermediate, 1.0),
+            (intermediate, leader, 1.0),
+            (isolated_start, isolated_bridge, 1.0),
+            (isolated_bridge, intermediate, 1.0),
+        ]
+    )
+    path_new: list[GridPoint] = [base, intermediate, leader]
+    initial_positions: RobotPositions = {
+        0: leader,
+        1: intermediate,
+        2: isolated_start,
+    }
+
+    snapshots = reactive_replan(
+        graph,
+        path_new,
+        initial_positions,
+        fallback_on_deadlock=False,
+        frozen_robot_ids={0},
+        stop_when_robot_ids_connected_to_base={0, 2},
+        required_connected_robot_ids={1},
+        record_blocked_attempts=False,
+    )
+
+    assert snapshots
+    assert any(
+        snapshot["valid"] and snapshot["robot_id"] == 2
+        for snapshot in snapshots[1:]
+    )
+    assert reactive_module._robots_connected_to_base(
+        snapshots[-1]["positions"],
+        {0, 2},
+        base,
+        graph,
     )
 
 
@@ -119,8 +216,32 @@ def test_reactive_replan_blocks_when_deadlock_rule_is_triggered() -> None:
     assert "Deadlock detected" in snapshots[-1]["description"]
 
 
-def test_reactive_replan_uses_deterministic_fallback_after_deadlock() -> None:
-    """Checks fallback reset + deterministic redeployment when deadlock occurs."""
+def test_reactive_replan_can_skip_blocked_attempt_snapshots() -> None:
+    """Omits blocked move attempts when `record_blocked_attempts=False`."""
+    graph = _build_graph(
+        [
+            ((0, 0), (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+        ]
+    )
+    path_new: list[GridPoint] = [(0, 0), (0, 1), (0, 2)]
+    initial_positions: RobotPositions = {0: (0, 1), 1: (0, 2)}
+
+    snapshots = reactive_replan(
+        graph,
+        path_new,
+        initial_positions,
+        fallback_on_deadlock=False,
+        record_blocked_attempts=False,
+    )
+
+    assert len(snapshots) == 2
+    assert snapshots[-1]["valid"] is False
+    assert "Deadlock detected" in snapshots[-1]["description"]
+
+
+def test_reactive_replan_does_not_reset_to_base_after_deadlock() -> None:
+    """Deadlock is reported in place, even if legacy fallback flag is set."""
     graph = _build_graph(
         [
             ((0, 0), (0, 1), 1.0),
@@ -138,8 +259,9 @@ def test_reactive_replan_uses_deterministic_fallback_after_deadlock() -> None:
     )
 
     descriptions = [snapshot["description"] for snapshot in snapshots]
-    assert any("fallback reset to base" in description for description in descriptions)
-    assert snapshots[-1]["positions"][0] == (0, 2)
+    assert not any("fallback reset to base" in description for description in descriptions)
+    assert snapshots[-1]["positions"] == initial_positions
+    assert snapshots[-1]["valid"] is False
 
 
 def test_reactive_replanning_runs_full_update_path_and_schedule_pipeline() -> None:
@@ -229,3 +351,94 @@ def test_reactive_replanning_obstacle_point_requires_grid_obj() -> None:
             initial_positions={0: source},
             obstacle_point=(0, 0),
         )
+
+
+def test_reactive_replanning_respects_max_relay_robots_constraint() -> None:
+    """Rejects paths that require more relays than currently available."""
+    source: GridPoint = (0, 0)
+    target: GridPoint = (0, 4)
+    graph = _build_graph(
+        [
+            (source, (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 2), (0, 3), 1.0),
+            ((0, 3), target, 1.0),
+        ]
+    )
+
+    cost, path_new, _, _ = reactive_replanning(
+        graph,
+        source=source,
+        target=target,
+        initial_positions={0: source, 1: source, 2: source},
+        lam=0.0,
+        fallback_on_deadlock=False,
+        max_relay_robots=2,
+    )
+
+    assert cost == reactive_module.INFINITE_PATH_COST
+    assert path_new == []
+
+
+def test_reactive_replanning_never_adds_additional_relays() -> None:
+    """Insufficient available robots makes replanning infeasible."""
+    source: GridPoint = (0, 0)
+    target: GridPoint = (0, 4)
+    graph = _build_graph(
+        [
+            (source, (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 2), (0, 3), 1.0),
+            ((0, 3), target, 1.0),
+        ]
+    )
+
+    cost, path_new, snapshots, _ = reactive_replanning(
+        graph,
+        source=source,
+        target=target,
+        initial_positions={0: source, 1: source},
+        lam=0.0,
+        fallback_on_deadlock=False,
+        prefer_fewer_relays=True,
+        allow_additional_relays=True,
+    )
+
+    assert cost == reactive_module.INFINITE_PATH_COST
+    assert path_new == []
+    assert snapshots
+    assert len(snapshots[0]["positions"]) == 2
+    assert snapshots[0]["valid"] is False
+    assert "available robot count" in snapshots[0]["description"]
+
+
+def test_reactive_replan_stops_early_when_recovery_cannot_progress() -> None:
+    """Prevents running until max_steps on non-convergent recovery behavior."""
+    graph = _build_graph(
+        [
+            ((0, 0), (0, 1), 1.0),
+            ((0, 0), (1, 0), 1.0),
+            ((0, 1), (1, 0), 1.0),
+        ]
+    )
+    path_new: list[GridPoint] = [(0, 0), (2, 2)]
+    initial_positions: RobotPositions = {0: (2, 2), 1: (0, 0), 2: (1, 0)}
+
+    snapshots = reactive_replan(
+        graph,
+        path_new,
+        initial_positions,
+        fallback_on_deadlock=False,
+        frozen_robot_ids={0},
+        stop_when_robot_connected_to_base=0,
+        required_connected_robot_ids={1, 2},
+        max_steps=40,
+    )
+
+    assert snapshots
+    assert snapshots[-1]["valid"] is False
+    assert snapshots[-1]["step"] < 40
+    assert (
+        "cycle detected" in snapshots[-1]["description"].lower()
+        or "deadlock detected" in snapshots[-1]["description"].lower()
+    )

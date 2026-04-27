@@ -92,6 +92,42 @@ def test_line_of_sight_diagonal_flank_policy_either_is_stricter_than_both() -> N
     assert has_line_of_sight(grid, (0, 0), (1, 1), diagonal_flank_policy="either") is False
 
 
+def test_line_of_sight_is_direction_invariant_for_shallow_diagonal() -> None:
+    """Prevents one-way LOS approval caused by Bresenham tie-breaking."""
+    grid = MapGrid(3, 3)
+    grid.add_obstacle(1, 0)
+
+    forward_either = has_line_of_sight(
+        grid,
+        (0, 0),
+        (1, 2),
+        diagonal_flank_policy="either",
+    )
+    reverse_either = has_line_of_sight(
+        grid,
+        (1, 2),
+        (0, 0),
+        diagonal_flank_policy="either",
+    )
+    assert forward_either is False
+    assert reverse_either is False
+
+    forward_both = has_line_of_sight(
+        grid,
+        (0, 0),
+        (1, 2),
+        diagonal_flank_policy="both",
+    )
+    reverse_both = has_line_of_sight(
+        grid,
+        (1, 2),
+        (0, 0),
+        diagonal_flank_policy="both",
+    )
+    assert forward_both is True
+    assert reverse_both is True
+
+
 @pytest.mark.parametrize(
     "point_pair",
     [

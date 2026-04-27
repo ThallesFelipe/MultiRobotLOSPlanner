@@ -28,7 +28,7 @@ def relay_dijkstra(
     source: NodeT,
     target: NodeT,
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
-    prefer_fewer_relays: bool = True,
+    prefer_fewer_relays: bool = False,
 ) -> tuple[float, list[NodeT]]:
     """Computes a minimum-cost path with relay penalty over a weighted graph.
 
@@ -215,6 +215,115 @@ def relay_dijkstra(
 
             push_candidate(
                 priority_queue,
+                new_total_cost,
+                new_accumulated_euclidean_distance,
+                new_traversed_edge_count,
+                neighbor_node,
+                current_path + [neighbor_node],
+            )
+
+    return INFINITE_PATH_COST, []
+
+
+def relay_dijkstra_with_edge_cap(
+    graph: nx.Graph[NodeT],
+    source: NodeT,
+    target: NodeT,
+    lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
+    max_edges: int | None = None,
+) -> tuple[float, list[NodeT]]:
+    """Computes a minimum-cost path constrained by a maximum edge count.
+
+    The objective is still `sum(edge weights) + edge_count * lambda`; the cap
+    only encodes the finite number of available robots, since a path with
+    `m` segments requires `m` robots in the relay chain.
+    """
+    if lam < 0:
+        raise ValueError(
+            "Relay penalty lambda must be greater than or equal to 0; "
+            f"received lam={lam}."
+        )
+    if max_edges is not None and max_edges < 0:
+        raise ValueError(
+            "max_edges must be greater than or equal to 0; "
+            f"received max_edges={max_edges}."
+        )
+
+    if source not in graph or target not in graph:
+        return INFINITE_PATH_COST, []
+
+    edge_cap = max_edges if max_edges is not None else graph.number_of_nodes()
+    priority_queue: list[tuple[float, float, int, int, NodeT, list[NodeT]]] = []
+    tie_breaker_counter = 0
+
+    def push_candidate(
+        total_cost: float,
+        accumulated_euclidean_distance: float,
+        traversed_edge_count: int,
+        node: NodeT,
+        path: list[NodeT],
+    ) -> None:
+        nonlocal tie_breaker_counter
+        tie_breaker_counter += 1
+        heapq.heappush(
+            priority_queue,
+            (
+                total_cost,
+                accumulated_euclidean_distance,
+                traversed_edge_count,
+                tie_breaker_counter,
+                node,
+                path,
+            ),
+        )
+
+    push_candidate(0.0, 0.0, 0, source, [source])
+    best_cost_by_state: dict[tuple[NodeT, int], float] = {(source, 0): 0.0}
+
+    while priority_queue:
+        (
+            total_cost,
+            accumulated_euclidean_distance,
+            traversed_edge_count,
+            _,
+            current_node,
+            current_path,
+        ) = heapq.heappop(priority_queue)
+
+        if total_cost > best_cost_by_state.get(
+            (current_node, traversed_edge_count),
+            INFINITE_PATH_COST,
+        ):
+            continue
+
+        if current_node == target:
+            return total_cost, current_path
+
+        if traversed_edge_count >= edge_cap:
+            continue
+
+        for neighbor_node in graph.neighbors(current_node):
+            if neighbor_node in current_path:
+                continue
+
+            edge_distance = graph[current_node][neighbor_node]["weight"]
+            new_accumulated_euclidean_distance = (
+                accumulated_euclidean_distance + edge_distance
+            )
+            new_traversed_edge_count = traversed_edge_count + 1
+            new_total_cost = new_accumulated_euclidean_distance + (
+                new_traversed_edge_count * lam
+            )
+            state_key = (neighbor_node, new_traversed_edge_count)
+
+            if new_total_cost >= best_cost_by_state.get(
+                state_key,
+                INFINITE_PATH_COST,
+            ):
+                continue
+
+            best_cost_by_state[state_key] = new_total_cost
+            push_candidate(
                 new_total_cost,
                 new_accumulated_euclidean_distance,
                 new_traversed_edge_count,

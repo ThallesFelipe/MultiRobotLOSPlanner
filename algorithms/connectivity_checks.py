@@ -6,6 +6,7 @@ replanning to keep movement validation logic consistent across planners.
 
 from collections import deque
 from collections.abc import Sequence
+import math
 
 import networkx as nx
 
@@ -17,8 +18,21 @@ ConnectivityPoint = GridPoint | FloatPoint
 
 
 def to_grid_point(point: ConnectivityPoint) -> GridPoint:
-    """Rounds a geometric point to the nearest occupancy-grid cell."""
-    return (round(point[0]), round(point[1]))
+    """Rounds a geometric point to the nearest occupancy-grid cell.
+
+    Uses half-away-from-zero rounding to avoid Python's banker rounding
+    (`round(0.5) == 0`), which can bias midpoint projection decisions.
+    """
+
+    def _round_half_away_from_zero(value: float) -> int:
+        if value >= 0.0:
+            return int(math.floor(value + 0.5))
+        return int(math.ceil(value - 0.5))
+
+    return (
+        _round_half_away_from_zero(float(point[0])),
+        _round_half_away_from_zero(float(point[1])),
+    )
 
 
 def midpoint(p1: GridPoint, p2: GridPoint) -> FloatPoint:
