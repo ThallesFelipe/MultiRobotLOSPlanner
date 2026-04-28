@@ -231,6 +231,32 @@ def test_plan_ordered_progression_can_prioritize_fewer_relays() -> None:
     assert all(snapshot["valid"] for snapshot in result["movement_snapshots"])
 
 
+def test_plan_ordered_progression_can_prioritize_fewer_relays_with_robot_count() -> None:
+    """Propagates relay-priority mode to capped path search."""
+    vis_graph: nx.Graph[GridPoint] = nx.Graph()
+    vis_graph.add_weighted_edges_from(
+        [
+            ((0, 0), (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 0), (0, 2), 4.0),
+        ]
+    )
+
+    result = plan_ordered_progression_on_visibility_graph(
+        vis_graph,
+        source=(0, 0),
+        target=(0, 2),
+        lam=1.0,
+        prefer_fewer_relays=True,
+        robot_count=2,
+    )
+
+    assert result["path"] == [(0, 0), (0, 2)]
+    assert math.isclose(result["path_cost"], 5.0, rel_tol=1e-12, abs_tol=1e-12)
+    assert result["robots_used"] == 1
+    assert len(result["movement_snapshots"][0]["positions"]) == 2
+
+
 def test_plan_ordered_progression_on_visibility_graph_handles_missing_path() -> None:
     """Returns empty plan payload when no path exists in visibility graph."""
     vis_graph: nx.Graph[GridPoint] = nx.Graph()

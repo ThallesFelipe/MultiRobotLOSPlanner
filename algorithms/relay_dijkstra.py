@@ -231,12 +231,32 @@ def relay_dijkstra_with_edge_cap(
     target: NodeT,
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
     max_edges: int | None = None,
+    prefer_fewer_relays: bool = False,
 ) -> tuple[float, list[NodeT]]:
     """Computes a minimum-cost path constrained by a maximum edge count.
 
     The objective is still `sum(edge weights) + edge_count * lambda`; the cap
     only encodes the finite number of available robots, since a path with
     `m` segments requires `m` robots in the relay chain.
+
+    Args:
+        graph: Visibility graph whose edges include a numeric `weight`.
+        source: Start node for the path search.
+        target: Goal node for the path search.
+        lam: Relay penalty `λ` added per traversed edge in the path cost `C(P)`.
+        max_edges: Maximum allowed traversed edges. When omitted, the search
+            uses the graph size as the effective cap.
+        prefer_fewer_relays: When `True`, the search prioritizes paths with
+            fewer traversed edges before minimizing penalized cost and
+            geometric distance.
+
+    Returns:
+        A tuple `(cost, path)` where `cost` is the objective value `C(P)` and
+        `path` is the corresponding node sequence. Returns `(inf, [])` when
+        `source` or `target` is missing, or when no capped path exists.
+
+    Raises:
+        ValueError: If `lam` or `max_edges` is negative.
     """
     if lam < 0:
         raise ValueError(
@@ -253,8 +273,100 @@ def relay_dijkstra_with_edge_cap(
         return INFINITE_PATH_COST, []
 
     edge_cap = max_edges if max_edges is not None else graph.number_of_nodes()
-    priority_queue: list[tuple[float, float, int, int, NodeT, list[NodeT]]] = []
     tie_breaker_counter = 0
+
+    if prefer_fewer_relays:
+        priority_queue_fewer_relays: list[
+            tuple[int, float, float, int, NodeT, list[NodeT]]
+        ] = []
+
+        def push_fewer_relay_candidate(
+            traversed_edge_count: int,
+            total_cost: float,
+            accumulated_euclidean_distance: float,
+            node: NodeT,
+            path: list[NodeT],
+        ) -> None:
+            """Pushes one lexicographic candidate favoring fewer traversed edges."""
+            nonlocal tie_breaker_counter
+            tie_breaker_counter += 1
+            heapq.heappush(
+                priority_queue_fewer_relays,
+                (
+                    traversed_edge_count,
+                    total_cost,
+                    accumulated_euclidean_distance,
+                    tie_breaker_counter,
+                    node,
+                    path,
+                ),
+            )
+
+        best_label_by_node: dict[NodeT, tuple[int, float, float]] = {
+            source: (0, 0.0, 0.0)
+        }
+
+        push_fewer_relay_candidate(0, 0.0, 0.0, source, [source])
+
+        while priority_queue_fewer_relays:
+            (
+                traversed_edge_count,
+                total_cost,
+                accumulated_euclidean_distance,
+                _,
+                current_node,
+                current_path,
+            ) = heapq.heappop(priority_queue_fewer_relays)
+
+            current_label = (
+                traversed_edge_count,
+                total_cost,
+                accumulated_euclidean_distance,
+            )
+            if best_label_by_node.get(current_node) != current_label:
+                continue
+
+            if current_node == target:
+                return total_cost, current_path
+
+            if traversed_edge_count >= edge_cap:
+                continue
+
+            for neighbor_node in graph.neighbors(current_node):
+                if neighbor_node in current_path:
+                    continue
+
+                edge_distance = graph[current_node][neighbor_node]["weight"]
+                new_accumulated_euclidean_distance = (
+                    accumulated_euclidean_distance + edge_distance
+                )
+                new_traversed_edge_count = traversed_edge_count + 1
+                new_total_cost = new_accumulated_euclidean_distance + (
+                    new_traversed_edge_count * lam
+                )
+
+                new_label = (
+                    new_traversed_edge_count,
+                    new_total_cost,
+                    new_accumulated_euclidean_distance,
+                )
+
+                best_known_label = best_label_by_node.get(neighbor_node)
+                if best_known_label is not None and new_label >= best_known_label:
+                    continue
+
+                best_label_by_node[neighbor_node] = new_label
+                push_fewer_relay_candidate(
+                    new_traversed_edge_count,
+                    new_total_cost,
+                    new_accumulated_euclidean_distance,
+                    neighbor_node,
+                    current_path + [neighbor_node],
+                )
+
+        return INFINITE_PATH_COST, []
+
+    priority_queue: list[tuple[float, float, int, int, NodeT, list[NodeT]]] = []
 
     def push_candidate(
         total_cost: float,

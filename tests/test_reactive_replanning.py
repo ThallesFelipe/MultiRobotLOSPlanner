@@ -99,7 +99,6 @@ def test_reactive_replan_moves_leader_to_goal() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
     )
 
     assert snapshots[0]["step"] == 0
@@ -131,10 +130,7 @@ def test_reactive_replan_rejects_partial_connectivity_recovery() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
         frozen_robot_ids={0},
-        stop_when_robot_connected_to_base=0,
-        required_connected_robot_ids={1, 2},
     )
 
     assert snapshots
@@ -145,7 +141,7 @@ def test_reactive_replan_rejects_partial_connectivity_recovery() -> None:
 
 
 def test_reactive_replan_can_wait_for_multiple_robot_reconnections() -> None:
-    """Keeps recovery active until all requested disconnected robots reconnect."""
+    """Keeps recovery active until all robots are connected to base."""
     base: GridPoint = (0, 0)
     intermediate: GridPoint = (0, 1)
     leader: GridPoint = (0, 2)
@@ -171,10 +167,7 @@ def test_reactive_replan_can_wait_for_multiple_robot_reconnections() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
         frozen_robot_ids={0},
-        stop_when_robot_ids_connected_to_base={0, 2},
-        required_connected_robot_ids={1},
         record_blocked_attempts=False,
     )
 
@@ -206,7 +199,6 @@ def test_reactive_replan_blocks_when_deadlock_rule_is_triggered() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
     )
 
     blocked_move = snapshots[1]
@@ -231,7 +223,6 @@ def test_reactive_replan_can_skip_blocked_attempt_snapshots() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
         record_blocked_attempts=False,
     )
 
@@ -240,8 +231,8 @@ def test_reactive_replan_can_skip_blocked_attempt_snapshots() -> None:
     assert "Deadlock detected" in snapshots[-1]["description"]
 
 
-def test_reactive_replan_does_not_reset_to_base_after_deadlock() -> None:
-    """Deadlock is reported in place, even if legacy fallback flag is set."""
+def test_reactive_replan_reports_deadlock_in_place() -> None:
+    """Deadlock is reported in place without resetting robots to base."""
     graph = _build_graph(
         [
             ((0, 0), (0, 1), 1.0),
@@ -255,7 +246,6 @@ def test_reactive_replan_does_not_reset_to_base_after_deadlock() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=True,
     )
 
     descriptions = [snapshot["description"] for snapshot in snapshots]
@@ -284,7 +274,6 @@ def test_reactive_replanning_runs_full_update_path_and_schedule_pipeline() -> No
         initial_positions={0: source, 1: source},
         blocked_edge=[(source, (0, 1)), ((0, 1), target)],
         lam=0.0,
-        fallback_on_deadlock=False,
     )
 
     assert updated_graph.has_edge(source, (0, 1)) is False
@@ -327,7 +316,6 @@ def test_reactive_replanning_uses_obstacle_point_to_infer_blocked_segment(
         obstacle_point=(0, 1),
         grid_obj=grid_obj,
         lam=0.0,
-        fallback_on_deadlock=False,
     )
 
     assert updated_graph.has_edge(source, (0, 1)) is False
@@ -372,7 +360,6 @@ def test_reactive_replanning_respects_max_relay_robots_constraint() -> None:
         target=target,
         initial_positions={0: source, 1: source, 2: source},
         lam=0.0,
-        fallback_on_deadlock=False,
         max_relay_robots=2,
     )
 
@@ -399,9 +386,6 @@ def test_reactive_replanning_never_adds_additional_relays() -> None:
         target=target,
         initial_positions={0: source, 1: source},
         lam=0.0,
-        fallback_on_deadlock=False,
-        prefer_fewer_relays=True,
-        allow_additional_relays=True,
     )
 
     assert cost == reactive_module.INFINITE_PATH_COST
@@ -428,10 +412,7 @@ def test_reactive_replan_stops_early_when_recovery_cannot_progress() -> None:
         graph,
         path_new,
         initial_positions,
-        fallback_on_deadlock=False,
         frozen_robot_ids={0},
-        stop_when_robot_connected_to_base=0,
-        required_connected_robot_ids={1, 2},
         max_steps=40,
     )
 

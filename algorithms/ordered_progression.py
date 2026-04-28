@@ -319,6 +319,7 @@ def plan_ordered_progression_on_visibility_graph(
             target,
             lam=lam,
             max_edges=robot_count,
+            prefer_fewer_relays=prefer_fewer_relays,
         )
 
     if path_cost == INFINITE_PATH_COST or not planned_path:

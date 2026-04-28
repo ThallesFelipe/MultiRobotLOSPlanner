@@ -1094,9 +1094,6 @@ class InteractiveReplannerApp(tk.Tk):
                 obstacle_point=obstacle_point,
                 grid_obj=self.map_grid,
                 lam=DEFAULT_RELAY_PENALTY_LAMBDA,
-                fallback_on_deadlock=False,
-                prefer_fewer_relays=False,
-                allow_additional_relays=False,
                 record_blocked_attempts=False,
             )
         except Exception as exc:

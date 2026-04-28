@@ -434,7 +434,6 @@ def _validate_move(
     grid_obj: MapGrid | None,
     connectivity_graph: nx.Graph[GridPoint],
     base: GridPoint,
-    required_connected_robot_ids: set[int] | None = None,
 ) -> tuple[bool, str]:
     """Validates a movement proposal under Algorithm 2 constraints."""
     if candidate_position == current_position:
@@ -528,7 +527,6 @@ def _acquisition_heuristic(
     grid_obj: MapGrid | None,
     connectivity_graph: nx.Graph[GridPoint],
     base: GridPoint,
-    required_connected_robot_ids: set[int] | None = None,
 ) -> GridPoint | None:
     """Selects the best acquisition move for robots outside `path_new`.
 
@@ -565,7 +563,6 @@ def _acquisition_heuristic(
             grid_obj,
             connectivity_graph,
             base,
-            required_connected_robot_ids=required_connected_robot_ids,
         )
         if not is_valid:
             continue
@@ -634,11 +631,7 @@ def reactive_replan(
     initial_positions: RobotPositions,
     grid_obj: MapGrid | None = None,
     max_steps: int = DEFAULT_MAX_REACTIVE_STEPS,
-    fallback_on_deadlock: bool = True,
     frozen_robot_ids: set[int] | None = None,
-    stop_when_robot_connected_to_base: int | None = None,
-    stop_when_robot_ids_connected_to_base: set[int] | None = None,
-    required_connected_robot_ids: set[int] | None = None,
     record_blocked_attempts: bool = True,
 ) -> list[MovementSnapshot]:
     """Runs Algorithm 1 and returns reactive movement snapshots.
@@ -649,18 +642,8 @@ def reactive_replan(
         initial_positions: Current robot positions by robot id.
         grid_obj: Occupancy grid used by midpoint LOS checks.
         max_steps: Safety bound for attempted movement snapshots.
-        fallback_on_deadlock: Deprecated compatibility flag. Deadlock now
-            terminates replanning as infeasible without resetting robots.
         frozen_robot_ids: Robot ids that must remain stationary during
             replanning.
-        stop_when_robot_connected_to_base: Deprecated compatibility argument.
-            Replanning now ends only when the leader reaches the final target
-            and every robot remains connected to base.
-        stop_when_robot_ids_connected_to_base: Deprecated compatibility
-            argument. Replanning now ends only at final mission completion.
-        required_connected_robot_ids: Deprecated compatibility argument.
-            Replanning now always requires every robot to remain connected to
-            the base, matching the LOS-chain validation in Algorithm 2.
         record_blocked_attempts: When `True`, includes blocked move attempts
             in the returned snapshot list.
 
@@ -696,13 +679,6 @@ def reactive_replan(
     frozen_ids = set(frozen_robot_ids or set())
     if not frozen_ids.issubset(expected_ids):
         raise ValueError("frozen_robot_ids must be valid robot ids.")
-
-    if stop_when_robot_connected_to_base is not None and stop_when_robot_connected_to_base not in positions:
-        raise ValueError(
-            "stop_when_robot_connected_to_base must be a valid robot id."
-        )
-
-    required_robot_ids = set(positions)
 
     base = path_new[0]
     goal = path_new[-1]
@@ -770,7 +746,6 @@ def reactive_replan(
                     grid_obj,
                     updated_graph,
                     base,
-                    required_connected_robot_ids=required_robot_ids,
                 )
 
             if candidate_position is None:
@@ -786,7 +761,6 @@ def reactive_replan(
                 grid_obj,
                 updated_graph,
                 base,
-                required_connected_robot_ids=required_robot_ids,
             )
 
             if is_valid:
@@ -855,14 +829,8 @@ def reactive_replanning(
     path_direction: PathDirection | None = None,
     direction_dot_threshold: float = DEFAULT_DIRECTION_DOT_THRESHOLD,
     max_steps: int = DEFAULT_MAX_REACTIVE_STEPS,
-    fallback_on_deadlock: bool = True,
     frozen_robot_ids: set[int] | None = None,
-    stop_when_robot_connected_to_base: int | None = None,
-    stop_when_robot_ids_connected_to_base: set[int] | None = None,
-    required_connected_robot_ids: set[int] | None = None,
     max_relay_robots: int | None = None,
-    prefer_fewer_relays: bool = False,
-    allow_additional_relays: bool = False,
     record_blocked_attempts: bool = True,
 ) -> tuple[float, list[GridPoint], list[MovementSnapshot], nx.Graph[GridPoint]]:
     """Runs full reactive replanning: graph update, path search, move generation.
@@ -883,25 +851,10 @@ def reactive_replanning(
         direction_dot_threshold: Dot threshold for directional blocked-corridor
             pruning.
         max_steps: Maximum number of attempted reactive movement snapshots.
-        fallback_on_deadlock: Deprecated compatibility flag. Deadlock now
-            terminates replanning as infeasible without resetting robots.
         frozen_robot_ids: Robot ids that must remain stationary during
             replanning.
-        stop_when_robot_connected_to_base: Deprecated compatibility argument.
-            Replanning now ends only when the leader reaches the final target
-            and every robot remains connected to base.
-        stop_when_robot_ids_connected_to_base: Deprecated compatibility
-            argument. Replanning now ends only at final mission completion.
-        required_connected_robot_ids: Deprecated compatibility argument.
-            Replanning now always requires every robot to stay connected to
-            base throughout replanning.
         max_relay_robots: Optional upper bound on support relay robots in the
             replanned path. The available robot count is always enforced.
-        prefer_fewer_relays: Deprecated compatibility argument. The planner
-            uses the penalized Dijkstra objective `distance + lambda` and does
-            not replace it with lexicographic relay minimization.
-        allow_additional_relays: Deprecated compatibility flag. Extra robots
-            are never spawned; insufficient robots makes replanning infeasible.
         record_blocked_attempts: When `True`, includes blocked move attempts
             in the returned snapshot list.
 
@@ -1010,11 +963,7 @@ def reactive_replanning(
         effective_initial_positions,
         grid_obj=grid_obj,
         max_steps=max_steps,
-        fallback_on_deadlock=fallback_on_deadlock,
         frozen_robot_ids=frozen_robot_ids,
-        stop_when_robot_connected_to_base=stop_when_robot_connected_to_base,
-        stop_when_robot_ids_connected_to_base=stop_when_robot_ids_connected_to_base,
-        required_connected_robot_ids=None,
         record_blocked_attempts=record_blocked_attempts,
     )
     return path_cost, path_new, snapshots, updated_graph
