@@ -1,6 +1,6 @@
 """Tests for Bresenham rasterization and LOS validation on occupancy grids."""
 
-import pytest
+from typing import Any
 
 from core.map_grid import MapGrid
 from core.visibility import bresenham, has_line_of_sight
@@ -8,22 +8,17 @@ from core.visibility import bresenham, has_line_of_sight
 GridPoint = tuple[int, int]
 
 
-@pytest.mark.parametrize(
-    ("start_point", "end_point", "expected_points"),
-    [
+def test_bresenham_expected_points() -> None:
+    """Verifies deterministic rasterization for representative line segments."""
+    cases: list[tuple[GridPoint, GridPoint, list[GridPoint]]] = [
         ((0, 0), (0, 3), [(0, 0), (0, 1), (0, 2), (0, 3)]),
         ((0, 0), (3, 0), [(0, 0), (1, 0), (2, 0), (3, 0)]),
         ((0, 0), (3, 3), [(0, 0), (1, 1), (2, 2), (3, 3)]),
         ((3, 3), (0, 0), [(3, 3), (2, 2), (1, 1), (0, 0)]),
-    ],
-)
-def test_bresenham_expected_points(
-    start_point: GridPoint,
-    end_point: GridPoint,
-    expected_points: list[GridPoint],
-) -> None:
-    """Verifies deterministic rasterization for representative line segments."""
-    assert list(bresenham(*start_point, *end_point)) == expected_points
+    ]
+
+    for start_point, end_point, expected_points in cases:
+        assert list(bresenham(*start_point, *end_point)) == expected_points
 
 
 def test_bresenham_same_point() -> None:
@@ -128,33 +123,39 @@ def test_line_of_sight_is_direction_invariant_for_shallow_diagonal() -> None:
     assert reverse_both is True
 
 
-@pytest.mark.parametrize(
-    "point_pair",
-    [
+def test_line_of_sight_out_of_bounds_returns_false() -> None:
+    """Verifies LOS queries fail fast when endpoints fall outside the map."""
+    cases: list[tuple[GridPoint, GridPoint]] = [
         ((-1, 0), (5, 5)),
         ((0, -1), (5, 5)),
         ((5, 5), (10, 10)),
         ((5, 5), (11, 11)),
-    ],
-)
-def test_line_of_sight_out_of_bounds_returns_false(
-    point_pair: tuple[GridPoint, GridPoint],
-) -> None:
-    """Verifies LOS queries fail fast when endpoints fall outside the map."""
-    grid = MapGrid(10, 10)
-    start_point, end_point = point_pair
-    assert has_line_of_sight(grid, start_point, end_point) is False
+    ]
+
+    for start_point, end_point in cases:
+        grid = MapGrid(10, 10)
+        assert has_line_of_sight(grid, start_point, end_point) is False
 
 
 def test_line_of_sight_negative_tolerance_raises_value_error() -> None:
     """Ensures invalid negative LOS tolerance raises `ValueError`."""
     grid = MapGrid(10, 10)
-    with pytest.raises(ValueError):
+    try:
         has_line_of_sight(grid, (0, 0), (1, 1), tolerance=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("has_line_of_sight() did not raise ValueError")
 
 
 def test_line_of_sight_invalid_diagonal_flank_policy_raises_value_error() -> None:
     """Ensures invalid diagonal flank policy raises `ValueError`."""
     grid = MapGrid(10, 10)
-    with pytest.raises(ValueError):
-        has_line_of_sight(grid, (0, 0), (1, 1), diagonal_flank_policy="invalid")
+    invalid_policy: Any = "invalid"
+
+    try:
+        has_line_of_sight(grid, (0, 0), (1, 1), diagonal_flank_policy=invalid_policy)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("has_line_of_sight() did not raise ValueError")

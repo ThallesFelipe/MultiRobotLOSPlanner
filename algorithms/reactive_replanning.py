@@ -14,8 +14,8 @@ import networkx as nx
 import numpy as np
 
 from algorithms.connectivity_checks import (
+    ConnectivityPoint,
     midpoint,
-    midpoint_has_los_to_chain,
     temporary_los_connectivity_check,
 )
 from algorithms.ordered_progression import (
@@ -316,12 +316,20 @@ def _next_path_vertex(
     return path_new[current_index + 1]
 
 
+def _target_path_index_for_robot(
+    robot_id: int,
+    path_new: Sequence[GridPoint],
+) -> int:
+    """Returns the final path index assigned to one robot in the relay chain."""
+    return max(0, len(path_new) - 1 - robot_id)
+
+
 def _max_path_progress_reachable(
     graph: nx.Graph[GridPoint],
     candidate_position: GridPoint,
     path_new: Sequence[GridPoint],
 ) -> int:
-    """Returns the farthest index in `path_new` reachable from candidate node."""
+    """Returns the farthest path index directly visible from a candidate node."""
     if candidate_position not in graph:
         return -1
 
@@ -329,7 +337,9 @@ def _max_path_progress_reachable(
         path_vertex = path_new[index]
         if path_vertex not in graph:
             continue
-        if nx.has_path(graph, candidate_position, path_vertex):
+        if candidate_position == path_vertex:
+            return index
+        if graph.has_edge(candidate_position, path_vertex):
             return index
     return -1
 
@@ -373,13 +383,65 @@ def _shortest_hops(
     return 10**9
 
 
-def _deadlock_avoidance_violation(
+def _move_skips_unfilled_target_vertices(
+    robot_id: int,
     current_position: GridPoint,
     candidate_position: GridPoint,
     positions: RobotPositions,
     path_new: Sequence[GridPoint],
 ) -> bool:
-    """Checks the deadlock-prevention rule from Algorithm 2."""
+    """Implements Algorithm 2's sequential-formation rejection."""
+    if candidate_position not in path_new:
+        return False
+
+    candidate_index = path_new.index(candidate_position)
+    simulated_positions = dict(positions)
+    simulated_positions[robot_id] = candidate_position
+    occupied_after_move = set(simulated_positions.values())
+
+    for required_vertex in path_new[1:candidate_index]:
+        if required_vertex not in occupied_after_move:
+            return True
+
+    if current_position in path_new:
+        current_index = path_new.index(current_position)
+        if candidate_index > current_index + 1:
+            return True
+
+    return False
+
+
+def _move_blocks_leader_immediate_advance(
+    robot_id: int,
+    candidate_position: GridPoint,
+    positions: RobotPositions,
+    path_new: Sequence[GridPoint],
+    leader_id: int,
+) -> bool:
+    """Implements Algorithm 2's lead-robot priority rejection."""
+    if robot_id == leader_id or leader_id not in positions:
+        return False
+
+    leader_next_vertex = _next_path_vertex(positions[leader_id], path_new)
+    if leader_next_vertex is None:
+        return False
+
+    simulated_positions = dict(positions)
+    simulated_positions[robot_id] = candidate_position
+    return any(
+        other_robot_id != leader_id and position == leader_next_vertex
+        for other_robot_id, position in simulated_positions.items()
+    )
+
+
+def _deadlock_avoidance_violation(
+    robot_id: int,
+    current_position: GridPoint,
+    candidate_position: GridPoint,
+    positions: RobotPositions,
+    path_new: Sequence[GridPoint],
+) -> bool:
+    """Implements the article's future-vertex saturation deadlock rule."""
     if current_position not in path_new or candidate_position not in path_new:
         return False
 
@@ -389,24 +451,144 @@ def _deadlock_avoidance_violation(
     if candidate_position != path_new[current_index + 1]:
         return False
 
-    forward_vertices = path_new[current_index + 1 :]
-    occupied_vertices = set(positions.values())
-    return all(vertex in occupied_vertices for vertex in forward_vertices)
+    future_vertices = path_new[current_index + 1 :]
+    occupied_by_others = {
+        position
+        for other_robot_id, position in positions.items()
+        if other_robot_id != robot_id
+    }
+    return all(vertex in occupied_by_others for vertex in future_vertices)
 
 
-def _robots_connected_to_base(
-    positions: RobotPositions,
-    required_robot_ids: set[int],
+def _temporary_graph_connectivity_check(
+    positions: Sequence[ConnectivityPoint],
     base: GridPoint,
+    movement_midpoint: ConnectivityPoint,
+    current_position: GridPoint,
+    candidate_position: GridPoint,
     connectivity_graph: nx.Graph[GridPoint],
 ) -> bool:
-    """Checks whether a robot subset is connected to base over occupied nodes."""
-    if not required_robot_ids:
+    """Graph-only fallback for Algorithm 2 when no occupancy grid is supplied.
+
+    The exact Algorithm 2 check is geometric and is handled by
+    `temporary_los_connectivity_check` when `grid_obj` exists. This fallback is
+    intentionally limited to preserving the same temporary-graph shape for
+    graph-only callers.
+    """
+    if not positions:
         return True
     if base not in connectivity_graph:
         return False
 
-    allowed_nodes = set(positions.values()) | {base}
+    temporary_graph: nx.Graph[ConnectivityPoint] = nx.Graph()
+    all_positions: list[ConnectivityPoint] = [base, *positions]
+    temporary_graph.add_nodes_from(all_positions)
+
+    movement_edge_exists = connectivity_graph.has_edge(
+        current_position,
+        candidate_position,
+    )
+
+    def _midpoint_has_graph_visibility_to(other_position: GridPoint) -> bool:
+        if not movement_edge_exists:
+            return False
+        if other_position in (current_position, candidate_position):
+            return True
+        return (
+            connectivity_graph.has_edge(current_position, other_position)
+            or connectivity_graph.has_edge(candidate_position, other_position)
+        )
+
+    def _has_graph_visibility(
+        source_position: ConnectivityPoint,
+        target_position: ConnectivityPoint,
+    ) -> bool:
+        if source_position == target_position:
+            return True
+
+        source_is_grid = _is_grid_point(source_position)
+        target_is_grid = _is_grid_point(target_position)
+        if source_is_grid and target_is_grid:
+            return connectivity_graph.has_edge(source_position, target_position)
+
+        if source_position == movement_midpoint and target_is_grid:
+            return _midpoint_has_graph_visibility_to(
+                target_position,
+            )
+        if target_position == movement_midpoint and source_is_grid:
+            return _midpoint_has_graph_visibility_to(
+                source_position,
+            )
+        return False
+
+    for source_index in range(len(all_positions)):
+        for target_index in range(source_index + 1, len(all_positions)):
+            source_position = all_positions[source_index]
+            target_position = all_positions[target_index]
+            if _has_graph_visibility(source_position, target_position):
+                temporary_graph.add_edge(source_position, target_position)
+
+    reachable: set[ConnectivityPoint] = {base}
+    queue: deque[ConnectivityPoint] = deque([base])
+
+    while queue:
+        node = queue.popleft()
+        for neighbor in temporary_graph.neighbors(node):
+            if neighbor not in reachable:
+                reachable.add(neighbor)
+                queue.append(neighbor)
+
+    return all(position in reachable for position in positions)
+
+
+def _temporary_midpoint_connectivity_to_base(
+    robot_id: int,
+    current_position: GridPoint,
+    candidate_position: GridPoint,
+    positions: RobotPositions,
+    grid_obj: MapGrid | None,
+    connectivity_graph: nx.Graph[GridPoint],
+    base: GridPoint,
+) -> bool:
+    """Builds Algorithm 2's simulated midpoint state and checks base reachability."""
+    movement_midpoint = midpoint(current_position, candidate_position)
+    robot_ids = sorted(positions)
+    simulated_midpoint_positions: list[ConnectivityPoint] = [
+        movement_midpoint
+        if other_robot_id == robot_id
+        else positions[other_robot_id]
+        for other_robot_id in robot_ids
+    ]
+
+    if grid_obj is not None:
+        return temporary_los_connectivity_check(
+            grid_obj,
+            simulated_midpoint_positions,
+            base,
+        )
+
+    return _temporary_graph_connectivity_check(
+        simulated_midpoint_positions,
+        base,
+        movement_midpoint,
+        current_position,
+        candidate_position,
+        connectivity_graph,
+    )
+
+
+def _graph_positions_connected_to_base(
+    positions: Sequence[GridPoint],
+    base: GridPoint,
+    connectivity_graph: nx.Graph[GridPoint],
+) -> bool:
+    """Checks base reachability over occupied graph vertices."""
+    if not positions:
+        return True
+    if base not in connectivity_graph:
+        return False
+
+    allowed_nodes = set(positions) | {base}
     reachable_nodes: set[GridPoint] = {base}
     queue: deque[GridPoint] = deque([base])
 
@@ -418,9 +600,28 @@ def _robots_connected_to_base(
             reachable_nodes.add(neighbor)
             queue.append(neighbor)
 
-    return all(
-        positions[robot_id] in reachable_nodes
-        for robot_id in required_robot_ids
+    return set(positions).issubset(reachable_nodes)
+
+
+def _final_positions_connected_to_base(
+    positions: RobotPositions,
+    grid_obj: MapGrid | None,
+    connectivity_graph: nx.Graph[GridPoint],
+    base: GridPoint,
+) -> bool:
+    """Checks the candidate final state, matching the article's global LOS rule."""
+    position_values = list(positions.values())
+    if grid_obj is not None:
+        return temporary_los_connectivity_check(
+            grid_obj,
+            position_values,
+            base,
+        )
+
+    return _graph_positions_connected_to_base(
+        position_values,
+        base,
+        connectivity_graph,
     )
 
 
@@ -446,26 +647,26 @@ def _validate_move(
     ):
         return False, "candidate is not an adjacent visibility-graph neighbor"
 
-    if candidate_position in path_new:
-        occupied_vertices = set(positions.values())
-        candidate_index = path_new.index(candidate_position)
-        for path_index in range(1, candidate_index):
-            if path_new[path_index] not in occupied_vertices:
-                return False, "sequential formation violated"
+    if _move_skips_unfilled_target_vertices(
+        robot_id,
+        current_position,
+        candidate_position,
+        positions,
+        path_new,
+    ):
+        return False, "sequential formation violated"
 
-        if current_position in path_new:
-            current_index = path_new.index(current_position)
-            if candidate_index > current_index + 1:
-                return False, "sequential formation violated"
-
-    if robot_id != leader_id and positions[leader_id] in path_new:
-        leader_current_index = path_new.index(positions[leader_id])
-        if leader_current_index + 1 < len(path_new):
-            leader_next_vertex = path_new[leader_current_index + 1]
-            if candidate_position == leader_next_vertex:
-                return False, "leader-priority rule violated"
+    if _move_blocks_leader_immediate_advance(
+        robot_id,
+        candidate_position,
+        positions,
+        path_new,
+        leader_id,
+    ):
+        return False, "leader-priority rule violated"
 
     if _deadlock_avoidance_violation(
+        robot_id,
         current_position,
         candidate_position,
         positions,
@@ -473,49 +674,208 @@ def _validate_move(
     ):
         return False, "deadlock-avoidance rule violated"
 
-    if grid_obj is not None:
-        midpoint_connectivity_ids = sorted(positions)
-        static_positions = [
-            positions[other_robot_id]
-            for other_robot_id in midpoint_connectivity_ids
-            if other_robot_id != robot_id
-        ]
-        static_positions.append(base)
-
-        if not midpoint_has_los_to_chain(
-            grid_obj,
-            current_position,
-            candidate_position,
-            static_positions,
-        ):
-            return False, "midpoint LOS to static chain failed"
-
-        movement_midpoint = midpoint(current_position, candidate_position)
-        simulated_midpoint_positions = [
-            movement_midpoint
-            if other_robot_id == robot_id
-            else positions[other_robot_id]
-            for other_robot_id in midpoint_connectivity_ids
-        ]
-        if not temporary_los_connectivity_check(
-            grid_obj,
-            simulated_midpoint_positions,
-            base,
-        ):
-            return False, "temporary midpoint connectivity to base failed"
+    if not _temporary_midpoint_connectivity_to_base(
+        robot_id,
+        current_position,
+        candidate_position,
+        positions,
+        grid_obj,
+        connectivity_graph,
+        base,
+    ):
+        return False, "temporary midpoint connectivity to base failed"
 
     simulated_positions = dict(positions)
     simulated_positions[robot_id] = candidate_position
-    required_robot_ids = set(positions)
-    if not _robots_connected_to_base(
+    if not _final_positions_connected_to_base(
         simulated_positions,
-        required_robot_ids,
-        base,
+        grid_obj,
         connectivity_graph,
+        base,
     ):
-        return False, "required connectivity to base failed"
+        return False, "final connectivity to base failed"
 
     return True, "ok"
+
+
+def _candidate_positions_for_robot(
+    robot_id: int,
+    current_position: GridPoint,
+    path_new: Sequence[GridPoint],
+    connectivity_graph: nx.Graph[GridPoint],
+) -> list[GridPoint]:
+    """Generates one-step candidates toward the robot's assigned path target."""
+    target_index = _target_path_index_for_robot(robot_id, path_new)
+
+    if current_position in path_new:
+        current_index = path_new.index(current_position)
+        if current_index < target_index:
+            return [path_new[current_index + 1]]
+        if current_index > target_index:
+            return [path_new[current_index - 1]]
+        return []
+
+    if current_position not in connectivity_graph:
+        return []
+
+    return list(connectivity_graph.neighbors(current_position))
+
+
+def _candidate_move_score(
+    robot_id: int,
+    current_position: GridPoint,
+    candidate_position: GridPoint,
+    path_new: Sequence[GridPoint],
+    connectivity_graph: nx.Graph[GridPoint],
+) -> tuple[float, ...] | None:
+    """Scores a validated candidate using the article's heuristic hierarchy."""
+    target_index = _target_path_index_for_robot(robot_id, path_new)
+    target_vertex = path_new[target_index]
+
+    current_progress = min(
+        _max_path_progress_reachable(
+            connectivity_graph,
+            current_position,
+            path_new,
+        ),
+        target_index,
+    )
+    candidate_progress = min(
+        _max_path_progress_reachable(
+            connectivity_graph,
+            candidate_position,
+            path_new,
+        ),
+        target_index,
+    )
+
+    if candidate_progress < current_progress:
+        return None
+
+    candidate_reaches_target = candidate_position == target_vertex
+    candidate_is_path_vertex = candidate_position in path_new
+    if (
+        candidate_progress == current_progress
+        and not candidate_reaches_target
+        and not candidate_is_path_vertex
+    ):
+        return None
+
+    return (
+        1.0
+        if robot_id == LEADER_ROBOT_ID and candidate_progress > current_progress
+        else 0.0,
+        1.0 if candidate_progress > current_progress else 0.0,
+        1.0 if candidate_reaches_target else 0.0,
+        float(candidate_progress),
+        1.0 if candidate_is_path_vertex else 0.0,
+        -_euclidean_distance(candidate_position, target_vertex),
+        -_euclidean_distance(current_position, candidate_position),
+        float(-robot_id),
+    )
+
+
+def _select_best_candidate_move(
+    positions: RobotPositions,
+    path_new: Sequence[GridPoint],
+    leader_id: int,
+    grid_obj: MapGrid | None,
+    connectivity_graph: nx.Graph[GridPoint],
+    base: GridPoint,
+    frozen_robot_ids: set[int],
+) -> tuple[int, GridPoint, GridPoint] | None:
+    """Selects the next global adaptive move from all valid robot candidates."""
+    best_move: tuple[int, GridPoint, GridPoint] | None = None
+    best_score: tuple[float, ...] | None = None
+
+    for robot_id in sorted(positions):
+        if robot_id in frozen_robot_ids:
+            continue
+
+        current_position = positions[robot_id]
+        for candidate_position in _candidate_positions_for_robot(
+            robot_id,
+            current_position,
+            path_new,
+            connectivity_graph,
+        ):
+            is_valid, _ = _validate_move(
+                robot_id,
+                current_position,
+                candidate_position,
+                positions,
+                path_new,
+                leader_id,
+                grid_obj,
+                connectivity_graph,
+                base,
+            )
+            if not is_valid:
+                continue
+
+            score = _candidate_move_score(
+                robot_id,
+                current_position,
+                candidate_position,
+                path_new,
+                connectivity_graph,
+            )
+            if score is None:
+                continue
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_move = (robot_id, current_position, candidate_position)
+
+    return best_move
+
+
+def _blocked_candidate_attempts(
+    positions: RobotPositions,
+    path_new: Sequence[GridPoint],
+    leader_id: int,
+    grid_obj: MapGrid | None,
+    connectivity_graph: nx.Graph[GridPoint],
+    base: GridPoint,
+    frozen_robot_ids: set[int],
+) -> list[tuple[int, GridPoint, GridPoint, str]]:
+    """Returns representative rejected candidates for deadlock diagnostics."""
+    blocked_attempts: list[tuple[int, GridPoint, GridPoint, str]] = []
+
+    for robot_id in sorted(positions):
+        if robot_id in frozen_robot_ids:
+            continue
+
+        current_position = positions[robot_id]
+        for candidate_position in _candidate_positions_for_robot(
+            robot_id,
+            current_position,
+            path_new,
+            connectivity_graph,
+        ):
+            is_valid, reason = _validate_move(
+                robot_id,
+                current_position,
+                candidate_position,
+                positions,
+                path_new,
+                leader_id,
+                grid_obj,
+                connectivity_graph,
+                base,
+            )
+            if not is_valid:
+                blocked_attempts.append(
+                    (
+                        robot_id,
+                        current_position,
+                        candidate_position,
+                        reason,
+                    )
+                )
+                break
+
+    return blocked_attempts
 
 
 def _acquisition_heuristic(
@@ -698,13 +1058,18 @@ def reactive_replan(
     seen_states: set[tuple[GridPoint, ...]] = set()
 
     def _termination_reached() -> bool:
+        occupied_vertices = set(positions.values())
+        target_path_is_filled = all(
+            path_vertex in occupied_vertices for path_vertex in path_new[1:]
+        )
         return (
             positions[LEADER_ROBOT_ID] == goal
-            and _robots_connected_to_base(
+            and target_path_is_filled
+            and _final_positions_connected_to_base(
                 positions,
-                set(positions),
-                base,
+                grid_obj,
                 updated_graph,
+                base,
             )
         )
 
@@ -726,91 +1091,81 @@ def reactive_replan(
             break
         seen_states.add(state_key)
 
-        moved_this_round = False
+        selected_move = _select_best_candidate_move(
+            positions,
+            path_new,
+            LEADER_ROBOT_ID,
+            grid_obj,
+            updated_graph,
+            base,
+            frozen_ids,
+        )
 
-        for robot_id in range(n_robots):
-            if robot_id in frozen_ids:
-                continue
-
-            current_position = positions[robot_id]
-
-            if current_position in path_new:
-                candidate_position = _next_path_vertex(current_position, path_new)
-            else:
-                candidate_position = _acquisition_heuristic(
+        if selected_move is None:
+            if record_blocked_attempts:
+                for (
                     robot_id,
                     current_position,
-                    path_new,
+                    candidate_position,
+                    reason,
+                ) in _blocked_candidate_attempts(
                     positions,
+                    path_new,
                     LEADER_ROBOT_ID,
                     grid_obj,
                     updated_graph,
                     base,
-                )
+                    frozen_ids,
+                ):
+                    if step >= max_steps:
+                        break
+                    step += 1
+                    _append_snapshot(
+                        snapshots,
+                        step,
+                        robot_id,
+                        current_position,
+                        current_position,
+                        positions,
+                        False,
+                        (
+                            f"Step {step}: r{robot_id + 1} blocked "
+                            f"({reason}) at {current_position}"
+                        ),
+                    )
 
-            if candidate_position is None:
-                continue
-
-            is_valid, reason = _validate_move(
-                robot_id,
-                current_position,
-                candidate_position,
-                positions,
-                path_new,
-                LEADER_ROBOT_ID,
-                grid_obj,
-                updated_graph,
-                base,
-            )
-
-            if is_valid:
+            if step < max_steps:
                 step += 1
-                positions[robot_id] = candidate_position
-                moved_this_round = True
-                description = (
-                    f"Step {step}: r{robot_id + 1} moves "
-                    f"{current_position}->{candidate_position}"
+                _append_snapshot(
+                    snapshots,
+                    step,
+                    None,
+                    None,
+                    None,
+                    positions,
+                    False,
+                    "Deadlock detected: no robot could perform a valid move.",
                 )
-                snapshot_to_position = candidate_position
-            else:
-                if not record_blocked_attempts:
-                    continue
-                step += 1
-                description = (
-                    f"Step {step}: r{robot_id + 1} blocked "
-                    f"({reason}) at {current_position}"
-                )
-                snapshot_to_position = current_position
-
-            _append_snapshot(
-                snapshots,
-                step,
-                robot_id,
-                current_position,
-                snapshot_to_position,
-                positions,
-                is_valid,
-                description,
-            )
-
-            if _termination_reached() or step >= max_steps:
-                break
-
-        if _termination_reached() or step >= max_steps:
             break
 
-        if not moved_this_round:
-            step += 1
-            _append_snapshot(
-                snapshots,
-                step,
-                None,
-                None,
-                None,
-                positions,
-                False,
-                "Deadlock detected: no robot could perform a valid move.",
-            )
+        robot_id, current_position, candidate_position = selected_move
+        step += 1
+        positions[robot_id] = candidate_position
+        _append_snapshot(
+            snapshots,
+            step,
+            robot_id,
+            current_position,
+            candidate_position,
+            positions,
+            True,
+            (
+                f"Step {step}: r{robot_id + 1} moves "
+                f"{current_position}->{candidate_position}"
+            ),
+        )
+
+        if step >= max_steps:
             break
 
     return snapshots
@@ -867,7 +1222,7 @@ def reactive_replanning(
         ValueError: If `obstacle_point` is provided without `grid_obj`.
     """
     updated_graph = visibility_graph.copy()
-    required_vertices = [source, target]
+    required_vertices = [source, target, *initial_positions.values()]
     if obstacle_point is not None:
         required_vertices.append(obstacle_point)
     updated_graph = _add_required_vertices_with_current_los(

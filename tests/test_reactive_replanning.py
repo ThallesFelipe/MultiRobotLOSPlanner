@@ -1,9 +1,9 @@
 """Tests for reactive replanning under LOS-constrained relay rules."""
 
 import math
+from typing import Any
 
 import networkx as nx
-import pytest
 
 import algorithms.reactive_replanning as reactive_module
 from algorithms.reactive_replanning import (
@@ -140,8 +140,8 @@ def test_reactive_replan_rejects_partial_connectivity_recovery() -> None:
     assert not any(snapshot["valid"] for snapshot in snapshots[1:])
 
 
-def test_reactive_replan_can_wait_for_multiple_robot_reconnections() -> None:
-    """Keeps recovery active until all robots are connected to base."""
+def test_reactive_replan_reconnects_extra_robot_after_target_path_is_reached() -> None:
+    """All robots must remain connected to the base, even extra support robots."""
     base: GridPoint = (0, 0)
     intermediate: GridPoint = (0, 1)
     leader: GridPoint = (0, 2)
@@ -171,21 +171,16 @@ def test_reactive_replan_can_wait_for_multiple_robot_reconnections() -> None:
         record_blocked_attempts=False,
     )
 
-    assert snapshots
-    assert any(
-        snapshot["valid"] and snapshot["robot_id"] == 2
-        for snapshot in snapshots[1:]
-    )
-    assert reactive_module._robots_connected_to_base(
-        snapshots[-1]["positions"],
-        {0, 2},
-        base,
-        graph,
-    )
+    assert snapshots[-1]["positions"] == {
+        0: leader,
+        1: intermediate,
+        2: isolated_bridge,
+    }
+    assert all(snapshot["valid"] for snapshot in snapshots)
 
 
-def test_reactive_replan_blocks_when_deadlock_rule_is_triggered() -> None:
-    """Ensures Algorithm 2 deadlock-prevention rule rejects blocked advances."""
+def test_reactive_replan_resolves_saturated_future_by_moving_follower_back() -> None:
+    """The adaptive scheduler can clear a saturated future vertex."""
     graph = _build_graph(
         [
             ((0, 0), (0, 1), 1.0),
@@ -201,15 +196,12 @@ def test_reactive_replan_blocks_when_deadlock_rule_is_triggered() -> None:
         initial_positions,
     )
 
-    blocked_move = snapshots[1]
-    assert blocked_move["robot_id"] == 0
-    assert blocked_move["valid"] is False
-    assert "deadlock-avoidance rule violated" in blocked_move["description"]
-    assert "Deadlock detected" in snapshots[-1]["description"]
+    assert snapshots[-1]["positions"] == {0: (0, 2), 1: (0, 1)}
+    assert all(snapshot["valid"] for snapshot in snapshots)
 
 
 def test_reactive_replan_can_skip_blocked_attempt_snapshots() -> None:
-    """Omits blocked move attempts when `record_blocked_attempts=False`."""
+    """A successful adaptive schedule contains only valid moves when requested."""
     graph = _build_graph(
         [
             ((0, 0), (0, 1), 1.0),
@@ -226,26 +218,21 @@ def test_reactive_replan_can_skip_blocked_attempt_snapshots() -> None:
         record_blocked_attempts=False,
     )
 
-    assert len(snapshots) == 2
-    assert snapshots[-1]["valid"] is False
-    assert "Deadlock detected" in snapshots[-1]["description"]
+    assert snapshots[-1]["positions"] == {0: (0, 2), 1: (0, 1)}
+    assert all(snapshot["valid"] for snapshot in snapshots)
 
 
 def test_reactive_replan_reports_deadlock_in_place() -> None:
     """Deadlock is reported in place without resetting robots to base."""
-    graph = _build_graph(
-        [
-            ((0, 0), (0, 1), 1.0),
-            ((0, 1), (0, 2), 1.0),
-        ]
-    )
+    graph = _build_graph([((0, 1), (0, 2), 1.0)])
     path_new: list[GridPoint] = [(0, 0), (0, 1), (0, 2)]
-    initial_positions: RobotPositions = {0: (0, 1), 1: (0, 2)}
+    initial_positions: RobotPositions = {0: (0, 2), 1: (0, 0)}
 
     snapshots = reactive_replan(
         graph,
         path_new,
         initial_positions,
+        frozen_robot_ids={0},
     )
 
     descriptions = [snapshot["description"] for snapshot in snapshots]
@@ -284,7 +271,7 @@ def test_reactive_replanning_runs_full_update_path_and_schedule_pipeline() -> No
 
 
 def test_reactive_replanning_uses_obstacle_point_to_infer_blocked_segment(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: Any,
 ) -> None:
     """Ensures `obstacle_point` path calls EDT corridor inference hook."""
     source: GridPoint = (0, 0)
@@ -331,7 +318,7 @@ def test_reactive_replanning_obstacle_point_requires_grid_obj() -> None:
     target: GridPoint = (0, 1)
     graph = _build_graph([(source, target, 1.0)])
 
-    with pytest.raises(ValueError, match="grid_obj is required"):
+    try:
         reactive_replanning(
             graph,
             source=source,
@@ -339,6 +326,10 @@ def test_reactive_replanning_obstacle_point_requires_grid_obj() -> None:
             initial_positions={0: source},
             obstacle_point=(0, 0),
         )
+    except ValueError as exc:
+        assert "grid_obj is required" in str(exc)
+    else:
+        raise AssertionError("reactive_replanning() did not raise ValueError")
 
 
 def test_reactive_replanning_respects_max_relay_robots_constraint() -> None:
@@ -396,8 +387,8 @@ def test_reactive_replanning_never_adds_additional_relays() -> None:
     assert "available robot count" in snapshots[0]["description"]
 
 
-def test_reactive_replan_stops_early_when_recovery_cannot_progress() -> None:
-    """Prevents running until max_steps on non-convergent recovery behavior."""
+def test_reactive_replan_reports_deadlock_when_extra_robot_cannot_reconnect() -> None:
+    """A finished target path is not enough when an extra robot is disconnected."""
     graph = _build_graph(
         [
             ((0, 0), (0, 1), 1.0),
@@ -416,10 +407,6 @@ def test_reactive_replan_stops_early_when_recovery_cannot_progress() -> None:
         max_steps=40,
     )
 
-    assert snapshots
+    assert snapshots[-1]["positions"] == initial_positions
     assert snapshots[-1]["valid"] is False
-    assert snapshots[-1]["step"] < 40
-    assert (
-        "cycle detected" in snapshots[-1]["description"].lower()
-        or "deadlock detected" in snapshots[-1]["description"].lower()
-    )
+    assert "Deadlock detected" in snapshots[-1]["description"]

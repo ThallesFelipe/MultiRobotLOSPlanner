@@ -3,7 +3,6 @@
 import math
 
 import networkx as nx
-import pytest
 
 from algorithms.relay_dijkstra import (
     count_relay_robots,
@@ -39,31 +38,26 @@ def test_relay_dijkstra_finds_minimum_penalized_path() -> None:
     assert math.isclose(cost, 4.0, rel_tol=1e-12, abs_tol=1e-12)
 
 
-@pytest.mark.parametrize(
-    ("lam", "expected_cost", "expected_path"),
-    [
+def test_relay_dijkstra_penalty_changes_selected_path() -> None:
+    """Checks that larger relay penalty biases the solution toward fewer hops."""
+    cases: list[tuple[float, float, PathNodes]] = [
         (0.0, 2.0, ["A", "B", "C"]),
         (1.0, 3.5, ["A", "C"]),
-    ],
-)
-def test_relay_dijkstra_penalty_changes_selected_path(
-    lam: float,
-    expected_cost: float,
-    expected_path: PathNodes,
-) -> None:
-    """Checks that larger relay penalty biases the solution toward fewer hops."""
-    graph = _build_graph(
-        [
-            ("A", "B", 1.0),
-            ("B", "C", 1.0),
-            ("A", "C", 2.5),
-        ]
-    )
+    ]
 
-    cost, path = relay_dijkstra(graph, "A", "C", lam=lam)
+    for lam, expected_cost, expected_path in cases:
+        graph = _build_graph(
+            [
+                ("A", "B", 1.0),
+                ("B", "C", 1.0),
+                ("A", "C", 2.5),
+            ]
+        )
 
-    assert path == expected_path
-    assert math.isclose(cost, expected_cost, rel_tol=1e-12, abs_tol=1e-12)
+        cost, path = relay_dijkstra(graph, "A", "C", lam=lam)
+
+        assert path == expected_path
+        assert math.isclose(cost, expected_cost, rel_tol=1e-12, abs_tol=1e-12)
 
 
 def test_relay_dijkstra_uses_default_lambda() -> None:
@@ -202,20 +196,23 @@ def test_relay_dijkstra_negative_lambda_raises_value_error() -> None:
     """Validates argument checking for invalid negative relay penalties."""
     graph = _build_graph([("A", "B", 1.0)])
 
-    with pytest.raises(ValueError):
+    try:
         relay_dijkstra(graph, "A", "B", lam=-0.1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("relay_dijkstra() did not raise ValueError")
 
 
-@pytest.mark.parametrize(
-    ("path", "expected"),
-    [
+def test_count_relay_robots() -> None:
+    """Ensures relay counting excludes source and target terminal nodes."""
+    cases: list[tuple[PathNodes, int]] = [
         ([], 0),
         (["A"], 0),
         (["A", "B"], 0),
         (["A", "B", "C"], 1),
         (["A", "B", "C", "D"], 2),
-    ],
-)
-def test_count_relay_robots(path: PathNodes, expected: int) -> None:
-    """Ensures relay counting excludes source and target terminal nodes."""
-    assert count_relay_robots(path) == expected
+    ]
+
+    for path, expected in cases:
+        assert count_relay_robots(path) == expected

@@ -51,7 +51,6 @@ from algorithms.relay_dijkstra import (
     DEFAULT_RELAY_PENALTY_LAMBDA,
     INFINITE_PATH_COST,
     relay_dijkstra,
-    relay_dijkstra_with_edge_cap,
 )
 from core.map_grid import GridPoint, MapGrid
 from core.map_processor import MapProcessor
@@ -91,9 +90,9 @@ DEFAULT_BOUNDARY_STRIDE = 1
 DEFAULT_MAX_VERTICES = 600
 DEFAULT_STEP_DELAY_MS = 350
 DEFAULT_OBSTACLE_RADIUS = 1
-DEFAULT_ROBOT_COUNT = 4
 DEFAULT_PLAN_PREFER_FEWER_RELAYS = False
 DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY: DiagonalFlankPolicy = DEFAULT_DIAGONAL_FLANK_POLICY
+DEFAULT_FLEET_ROBOT_COUNT = 4
 
 
 def _euclidean_distance(p1: GridPoint, p2: GridPoint) -> float:
@@ -215,7 +214,6 @@ class InteractiveReplannerApp(tk.Tk):
         self.step_info_var = tk.StringVar(value="Step: -")
         self.speed_var = tk.IntVar(value=DEFAULT_STEP_DELAY_MS)
         self.obstacle_radius_var = tk.IntVar(value=DEFAULT_OBSTACLE_RADIUS)
-        self.robot_count_var = tk.IntVar(value=DEFAULT_ROBOT_COUNT)
 
         self._build_layout()
         self._refresh_map_list()
@@ -256,15 +254,6 @@ class InteractiveReplannerApp(tk.Tk):
             from_=0,
             to=10,
             textvariable=self.obstacle_radius_var,
-            width=4,
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(top, text="Robôs:").pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Spinbox(
-            top,
-            from_=1,
-            to=20,
-            textvariable=self.robot_count_var,
             width=4,
         ).pack(side=tk.LEFT)
 
@@ -531,41 +520,25 @@ class InteractiveReplannerApp(tk.Tk):
             if snapshot["valid"] and snapshot["robot_id"] is not None
         )
 
-    def _selected_robot_count(self) -> int:
-        """Returns the configured fleet size for planning and replanning."""
-        return max(1, int(self.robot_count_var.get()))
-
     def _build_plan_candidate(
         self,
         planning_graph: nx.Graph[GridPoint],
-        prefer_fewer_relays: bool,
     ) -> tuple[float, list[GridPoint], list[MovementSnapshot], int] | None:
         """Builds one planning candidate and scores it by blocked steps."""
         assert self.source_point is not None and self.target_point is not None
         assert self.map_grid is not None
 
-        robot_count = self._selected_robot_count()
-        if prefer_fewer_relays:
-            cost, path = relay_dijkstra(
-                planning_graph,
-                self.source_point,
-                self.target_point,
-                lam=DEFAULT_RELAY_PENALTY_LAMBDA,
-                prefer_fewer_relays=True,
-            )
-            if len(path) - 1 > robot_count:
-                cost, path = INFINITE_PATH_COST, []
-        else:
-            cost, path = relay_dijkstra_with_edge_cap(
-                planning_graph,
-                self.source_point,
-                self.target_point,
-                lam=DEFAULT_RELAY_PENALTY_LAMBDA,
-                max_edges=robot_count,
-            )
+        cost, path = relay_dijkstra(
+            planning_graph,
+            self.source_point,
+            self.target_point,
+            lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+            prefer_fewer_relays=DEFAULT_PLAN_PREFER_FEWER_RELAYS,
+        )
         if cost == INFINITE_PATH_COST or not path:
             return None
 
+        robot_count = max(DEFAULT_FLEET_ROBOT_COUNT, len(path) - 1)
         snapshots = ordered_progression(
             path,
             grid_obj=self.map_grid,
@@ -623,7 +596,6 @@ class InteractiveReplannerApp(tk.Tk):
 
         candidate = self._build_plan_candidate(
             planning_graph,
-            prefer_fewer_relays=False,
         )
 
         if candidate is None:

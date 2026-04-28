@@ -4,8 +4,6 @@ These tests validate that `MapGrid` operations preserve expected `C_free` and
 `C_obs` semantics and that the stable core package API remains available.
 """
 
-import pytest
-
 import core
 from core import (
     MapGrid,
@@ -50,20 +48,19 @@ def test_map_grid_starts_empty() -> None:
     assert grid.grid.sum() == 0
 
 
-@pytest.mark.parametrize(
-    ("grid_point", "expected"),
-    [
+def test_map_grid_in_bounds() -> None:
+    """Checks `in_bounds` behavior for valid and invalid occupancy-grid points."""
+    cases: list[tuple[GridPoint, bool]] = [
         ((0, 0), True),
         ((2, 3), True),
         ((-1, 0), False),
         ((3, 0), False),
         ((0, 4), False),
-    ],
-)
-def test_map_grid_in_bounds(grid_point: GridPoint, expected: bool) -> None:
-    """Checks `in_bounds` behavior for valid and invalid occupancy-grid points."""
-    grid = MapGrid(3, 4)
-    assert grid.in_bounds(*grid_point) is expected
+    ]
+
+    for grid_point, expected in cases:
+        grid = MapGrid(3, 4)
+        assert grid.in_bounds(*grid_point) is expected
 
 
 def test_add_obstacle_and_is_free() -> None:
@@ -84,37 +81,45 @@ def test_add_obstacle_rect_marks_expected_area() -> None:
             is_rectangle_cell = 1 <= row_index < 4 and 2 <= col_index < 5
             assert grid.is_free(row_index, col_index) is (not is_rectangle_cell)
 
-
-@pytest.mark.parametrize(
-    "rect_range",
-    [
+def test_add_obstacle_rect_rejects_invalid_ranges() -> None:
+    """Validates that invalid `[start, end)` rectangles raise `ValueError`."""
+    cases: list[GridRectRange] = [
         (2, 2, 1, 3),
         (3, 1, 1, 3),
         (-1, 2, 1, 3),
         (0, 6, 1, 3),
         (0, 2, 3, 3),
-    ],
-)
-def test_add_obstacle_rect_rejects_invalid_ranges(
-    rect_range: GridRectRange,
-) -> None:
-    """Validates that invalid `[start, end)` rectangles raise `ValueError`."""
-    grid = MapGrid(5, 5)
-    with pytest.raises(ValueError):
-        grid.add_obstacle_rect(*rect_range)
+    ]
+
+    for rect_range in cases:
+        grid = MapGrid(5, 5)
+        try:
+            grid.add_obstacle_rect(*rect_range)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("add_obstacle_rect() did not raise ValueError")
 
 
-@pytest.mark.parametrize(
-    "grid_point",
-    [(-1, 0), (0, -1), (5, 0), (0, 5)],
-)
-def test_map_grid_bounds_checks_raise_value_error(grid_point: GridPoint) -> None:
+def test_map_grid_bounds_checks_raise_value_error() -> None:
     """Ensures bounds-checked APIs raise `ValueError` for out-of-range points."""
-    grid = MapGrid(5, 5)
-    with pytest.raises(ValueError):
-        grid.is_free(*grid_point)
-    with pytest.raises(ValueError):
-        grid.add_obstacle(*grid_point)
+    cases: list[GridPoint] = [(-1, 0), (0, -1), (5, 0), (0, 5)]
+
+    for grid_point in cases:
+        grid = MapGrid(5, 5)
+        try:
+            grid.is_free(*grid_point)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("is_free() did not raise ValueError")
+
+        try:
+            grid.add_obstacle(*grid_point)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("add_obstacle() did not raise ValueError")
 
 
 def test_map_grid_string_and_repr() -> None:

@@ -3,7 +3,6 @@
 import math
 
 import networkx as nx
-import pytest
 
 from algorithms.ordered_progression import (
     count_path_traversed_cells,
@@ -16,56 +15,47 @@ from core.map_grid import MapGrid
 
 GridPoint = tuple[int, int]
 
-
-@pytest.mark.parametrize(
-    ("n_nodes", "expected"),
-    [
+def test_total_moves_formula() -> None:
+    """Validates closed-form movement count for ordered progression."""
+    cases: list[tuple[int, int]] = [
         (0, 0),
         (1, 0),
         (2, 1),
         (3, 3),
         (4, 6),
         (5, 10),
-    ],
-)
-def test_total_moves_formula(n_nodes: int, expected: int) -> None:
-    """Validates closed-form movement count for ordered progression."""
-    assert total_moves_formula(n_nodes) == expected
+    ]
+
+    for n_nodes, expected in cases:
+        assert total_moves_formula(n_nodes) == expected
 
 
-@pytest.mark.parametrize("n_nodes", [2, 3, 4, 5, 6])
-def test_deterministic_sequence_length_matches_formula(n_nodes: int) -> None:
+def test_deterministic_sequence_length_matches_formula() -> None:
     """Ensures schedule size matches `M = (n - 1) * n / 2`."""
-    sequence = deterministic_sequence(n_nodes)
-    assert len(sequence) == total_moves_formula(n_nodes)
+    for n_nodes in [2, 3, 4, 5, 6]:
+        sequence = deterministic_sequence(n_nodes)
+        assert len(sequence) == total_moves_formula(n_nodes)
 
 
-@pytest.mark.parametrize(
-    ("n_nodes", "expected_sequence"),
-    [
+def test_deterministic_sequence_expected_patterns() -> None:
+    """Checks canonical small-size robot scheduling patterns."""
+    cases: list[tuple[int, list[int]]] = [
         (1, []),
         (2, [0]),
         (3, [0, 1, 0]),
         (4, [0, 1, 0, 2, 1, 0]),
-    ],
-)
-def test_deterministic_sequence_expected_patterns(
-    n_nodes: int,
-    expected_sequence: list[int],
-) -> None:
-    """Checks canonical small-size robot scheduling patterns."""
-    assert deterministic_sequence(n_nodes) == expected_sequence
+    ]
+
+    for n_nodes, expected_sequence in cases:
+        assert deterministic_sequence(n_nodes) == expected_sequence
 
 
-@pytest.mark.parametrize(
-    "path",
-    [[], [(0, 0)]],
-)
-def test_ordered_progression_short_paths_return_empty(
-    path: list[GridPoint],
-) -> None:
+def test_ordered_progression_short_paths_return_empty() -> None:
     """Verifies that invalidly short paths produce no snapshots."""
-    assert ordered_progression(path) == []
+    short_paths: list[list[GridPoint]] = [[], [(0, 0)]]
+
+    for path in short_paths:
+        assert ordered_progression(path) == []
 
 
 def test_ordered_progression_snapshot_count_matches_formula() -> None:
@@ -113,8 +103,12 @@ def test_ordered_progression_rejects_insufficient_robot_count() -> None:
     """A path with n nodes requires at least n - 1 robots."""
     path: list[GridPoint] = [(0, 0), (0, 1), (0, 2)]
 
-    with pytest.raises(ValueError, match="insufficient"):
+    try:
         ordered_progression(path, robot_count=1)
+    except ValueError as exc:
+        assert "insufficient" in str(exc)
+    else:
+        raise AssertionError("ordered_progression() did not raise ValueError")
 
 
 def test_ordered_progression_initial_snapshot_metadata() -> None:
@@ -164,18 +158,17 @@ def test_ordered_progression_blocks_when_visibility_graph_disconnects() -> None:
     assert all(position == path[0] for position in snapshots[-1]["positions"].values())
 
 
-@pytest.mark.parametrize(
-    ("path", "expected_cell_count"),
-    [
+def test_count_path_traversed_cells() -> None:
+    """Counts rasterized occupancy-grid cells traversed by a path."""
+    cases: list[tuple[list[GridPoint], int]] = [
         ([], 0),
         ([(0, 0)], 1),
         ([(0, 0), (0, 3)], 4),
         ([(0, 0), (0, 2), (2, 2)], 5),
-    ],
-)
-def test_count_path_traversed_cells(path: list[GridPoint], expected_cell_count: int) -> None:
-    """Counts rasterized occupancy-grid cells traversed by a path."""
-    assert count_path_traversed_cells(path) == expected_cell_count
+    ]
+
+    for path, expected_cell_count in cases:
+        assert count_path_traversed_cells(path) == expected_cell_count
 
 
 def test_plan_ordered_progression_on_visibility_graph_returns_path_and_snapshots() -> None:
