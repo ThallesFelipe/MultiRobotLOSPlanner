@@ -1,5 +1,4 @@
-"""JSON catalog storage for occupancy-grid map presets.
-"""
+"""JSON catalog storage for occupancy-grid map presets."""
 
 from __future__ import annotations
 
@@ -104,7 +103,10 @@ def _read_catalog(catalog_path: Path | str = DEFAULT_CATALOG_PATH) -> CatalogDat
     return {"version": version, "maps": maps}
 
 
-def _write_catalog(data: CatalogData, catalog_path: Path | str = DEFAULT_CATALOG_PATH) -> None:
+def _write_catalog(
+    data: CatalogData,
+    catalog_path: Path | str = DEFAULT_CATALOG_PATH,
+) -> None:
     """Writes catalog JSON to disk using stable formatting."""
     path = Path(catalog_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +117,10 @@ def _write_catalog(data: CatalogData, catalog_path: Path | str = DEFAULT_CATALOG
     )
 
 
-def _parse_map_entry(map_name: str, entry: object) -> tuple[int, int, list[GridRectangle]]:
+def _parse_map_entry(
+    map_name: str,
+    entry: object,
+) -> tuple[int, int, list[GridRectangle]]:
     """Parses and validates one map entry from catalog data."""
     if not isinstance(entry, dict):
         raise ValueError(f"Map entry {map_name!r} must be a JSON object.")
@@ -138,7 +143,11 @@ def _parse_map_entry(map_name: str, entry: object) -> tuple[int, int, list[GridR
                 f"Map entry {map_name!r} contains a rectangle with invalid type."
             )
         rectangles.append(
-            _validate_rectangle(cast(Sequence[object], rectangle_raw), rows=rows, cols=cols)
+            _validate_rectangle(
+                cast(Sequence[object], rectangle_raw),
+                rows=rows,
+                cols=cols,
+            )
         )
 
     return (rows, cols, rectangles)
@@ -199,7 +208,10 @@ def create_map_from_catalog(
             f"Available maps: [{available}]"
         )
 
-    rows, cols, rectangles = _parse_map_entry(normalized_map_name, maps[normalized_map_name])
+    rows, cols, rectangles = _parse_map_entry(
+        normalized_map_name,
+        maps[normalized_map_name],
+    )
 
     map_grid = MapGrid(
         rows=rows * valid_scale_factor,

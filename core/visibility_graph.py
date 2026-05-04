@@ -64,8 +64,8 @@ def build_visibility_graph(
             ):
                 euclidean_distance = float(
                     np.hypot(
-                    target_vertex[0] - source_vertex[0],
-                    target_vertex[1] - source_vertex[1],
+                        target_vertex[0] - source_vertex[0],
+                        target_vertex[1] - source_vertex[1],
                     )
                 )
                 visibility_graph.add_edge(

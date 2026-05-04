@@ -655,10 +655,24 @@ def compute_blocked_corridor_segment(
         max_steps,
     )
 
-    forward_distance = float(np.hypot(candidate_forward[0] - p_c1[0], candidate_forward[1] - p_c1[1]))
-    backward_distance = float(np.hypot(candidate_backward[0] - p_c1[0], candidate_backward[1] - p_c1[1]))
+    forward_distance = float(
+        np.hypot(
+            candidate_forward[0] - p_c1[0],
+            candidate_forward[1] - p_c1[1],
+        )
+    )
+    backward_distance = float(
+        np.hypot(
+            candidate_backward[0] - p_c1[0],
+            candidate_backward[1] - p_c1[1],
+        )
+    )
 
-    p_c2 = candidate_forward if forward_distance >= backward_distance else candidate_backward
+    p_c2 = (
+        candidate_forward
+        if forward_distance >= backward_distance
+        else candidate_backward
+    )
 
     if p_c2 == p_c1:
         p_c2 = _walk_along_fixed_direction(

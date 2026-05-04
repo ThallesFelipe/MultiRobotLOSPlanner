@@ -6,12 +6,15 @@ Usage:
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = PROJECT_ROOT / "tools"
+try:
+    from tools._bootstrap import PROJECT_ROOT, TOOLS_DIR, ensure_project_root_on_path
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import PROJECT_ROOT, TOOLS_DIR, ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 
 def _run_script(script_name: str, extra_args: list[str] | None = None) -> int:

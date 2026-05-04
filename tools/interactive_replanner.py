@@ -18,15 +18,17 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Callable, cast
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from tools._bootstrap import ensure_project_root_on_path
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 import matplotlib
 
@@ -66,6 +68,7 @@ from presets.map_catalog import (
     create_map_from_catalog,
     list_catalog_maps,
 )
+from tools.common import extract_boundary_vertices
 
 FREE_SPACE_COLOR = "#F4F1E8"
 OBSTACLE_COLOR = "#1F2321"
@@ -105,38 +108,12 @@ def _extract_boundary_vertices(
     max_vertices: int | None = DEFAULT_MAX_VERTICES,
 ) -> list[GridPoint]:
     """Extracts free cells that touch obstacle cells to serve as graph vertices."""
-    if boundary_stride <= 0:
-        raise ValueError("boundary_stride must be greater than 0.")
-
-    vertices: list[GridPoint] = []
-    for row in range(map_grid.rows):
-        for col in range(map_grid.cols):
-            if not map_grid.is_free(row, col):
-                continue
-            if ((row + col) % boundary_stride) != 0:
-                continue
-
-            has_obstacle_neighbor = False
-            for d_row in (-1, 0, 1):
-                for d_col in (-1, 0, 1):
-                    if d_row == 0 and d_col == 0:
-                        continue
-                    n_row, n_col = row + d_row, col + d_col
-                    if not map_grid.in_bounds(n_row, n_col):
-                        continue
-                    if not map_grid.is_free(n_row, n_col):
-                        has_obstacle_neighbor = True
-                        break
-                if has_obstacle_neighbor:
-                    break
-
-            if has_obstacle_neighbor:
-                vertices.append((row, col))
-
-    if max_vertices is not None and len(vertices) > max_vertices:
-        sampling_step = max(1, len(vertices) // max_vertices)
-        vertices = vertices[::sampling_step]
-    return vertices
+    return extract_boundary_vertices(
+        map_grid,
+        boundary_stride,
+        max_vertices,
+        sampling_mode="floor",
+    )
 
 
 def _extract_visibility_vertices(map_grid: MapGrid) -> list[GridPoint]:
@@ -923,76 +900,6 @@ class InteractiveReplannerApp(tk.Tk):
         """Keeps deferred obstacles registered for runtime leader validation."""
         if not self.pending_obstacle_events or self.map_grid is None:
             return
-
-    def _positions_connected_via_graph(
-        self,
-        occupied_positions: set[GridPoint],
-        connectivity_graph: nx.Graph[GridPoint],
-        base: GridPoint,
-    ) -> bool:
-        """Checks whether occupied nodes stay connected to base in a graph."""
-        if not occupied_positions:
-            return True
-        if base not in connectivity_graph:
-            return False
-
-        allowed_nodes = occupied_positions | {base}
-        reachable: set[GridPoint] = {base}
-        queue: list[GridPoint] = [base]
-
-        while queue:
-            node = queue.pop(0)
-            for neighbor in connectivity_graph.neighbors(node):
-                if neighbor not in allowed_nodes or neighbor in reachable:
-                    continue
-                reachable.add(neighbor)
-                queue.append(neighbor)
-
-        return occupied_positions.issubset(reachable)
-
-    def _connected_robot_ids_via_graph(
-        self,
-        positions: dict[int, GridPoint],
-        connectivity_graph: nx.Graph[GridPoint],
-        base: GridPoint,
-    ) -> set[int]:
-        """Returns robot ids whose occupied positions are connected to base."""
-        if not positions:
-            return set()
-        if base not in connectivity_graph:
-            return set()
-
-        allowed_nodes = set(positions.values()) | {base}
-        reachable_nodes: set[GridPoint] = {base}
-        queue: list[GridPoint] = [base]
-
-        while queue:
-            node = queue.pop(0)
-            for neighbor in connectivity_graph.neighbors(node):
-                if neighbor not in allowed_nodes or neighbor in reachable_nodes:
-                    continue
-                reachable_nodes.add(neighbor)
-                queue.append(neighbor)
-
-        return {
-            robot_id
-            for robot_id, position in positions.items()
-            if position in reachable_nodes
-        }
-
-    def _disconnected_robot_ids_via_graph(
-        self,
-        positions: dict[int, GridPoint],
-        connectivity_graph: nx.Graph[GridPoint],
-        base: GridPoint,
-    ) -> set[int]:
-        """Returns robot ids that are not connected to base."""
-        connected_ids = self._connected_robot_ids_via_graph(
-            positions,
-            connectivity_graph,
-            base,
-        )
-        return set(positions) - connected_ids
 
     def _spread_overlapping_positions(
         self,

@@ -36,7 +36,7 @@ def to_grid_point(point: ConnectivityPoint) -> GridPoint:
 
 
 def midpoint(p1: GridPoint, p2: GridPoint) -> FloatPoint:
-    """Computes the geometric midpoint between two occupancy-grid points."""
+    """Algoritmo 2, linha 7: calcula pmid entre pcurrent e pcandidate."""
     return ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
 
 
@@ -68,7 +68,7 @@ def midpoint_has_los_to_chain(
     p_to: GridPoint,
     static_positions: Sequence[GridPoint],
 ) -> bool:
-    """Checks LOS from the movement midpoint to at least one static robot."""
+    """Algoritmo 2, linhas 7-10: testa LOS do pmid para a cadeia estatica."""
     if not static_positions:
         return True
 
@@ -84,14 +84,16 @@ def temporary_los_connectivity_check(
     positions: Sequence[ConnectivityPoint],
     base: GridPoint,
 ) -> bool:
-    """Validates whether all robots remain LOS-connected to the base."""
+    """Algoritmo 2, linhas 8-10: cria Gtemp de Psim e testa conexao a base."""
     if not positions:
         return True
 
+    # Algoritmo 2, linhas 8-9: Psim vira os nos do grafo temporario Gtemp.
     temporary_graph: nx.Graph[ConnectivityPoint] = nx.Graph()
     all_positions: list[ConnectivityPoint] = [base, *positions]
     temporary_graph.add_nodes_from(all_positions)
 
+    # Algoritmo 2, linha 9: cada aresta de Gtemp representa uma LOS livre.
     for source_index in range(len(all_positions)):
         for target_index in range(source_index + 1, len(all_positions)):
             source_position = all_positions[source_index]
@@ -99,6 +101,7 @@ def temporary_los_connectivity_check(
             if has_los_between_points(grid_obj, source_position, target_position):
                 temporary_graph.add_edge(source_position, target_position)
 
+    # Algoritmo 2, linha 10: BFS a partir da base para saber quem esta conectado.
     reachable: set[ConnectivityPoint] = {base}
     queue: deque[ConnectivityPoint] = deque([base])
 
@@ -117,7 +120,7 @@ def bfs_connected(
     base: GridPoint,
     vis_graph: nx.Graph[GridPoint],
 ) -> bool:
-    """Checks connectivity to the base over a precomputed visibility graph."""
+    """Algoritmo 2, linhas 9-10: checa conexao a base no grafo de visibilidade."""
     if not positions:
         return True
     if base not in vis_graph:

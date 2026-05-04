@@ -33,6 +33,11 @@ dist/
 # Logs
 *.log
 
+# Environment files
+.env
+.env.*
+!.env.example
+
 # OS/editor files
 .DS_Store
 Thumbs.db

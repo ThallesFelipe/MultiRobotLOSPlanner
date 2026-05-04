@@ -344,45 +344,6 @@ def _max_path_progress_reachable(
     return -1
 
 
-def _first_unoccupied_path_vertex(
-    path_new: Sequence[GridPoint],
-    occupied_vertices: set[GridPoint],
-) -> GridPoint:
-    """Returns the next path vertex that still needs a robot assignment."""
-    for path_vertex in path_new[1:]:
-        if path_vertex not in occupied_vertices:
-            return path_vertex
-    return path_new[-1]
-
-
-def _shortest_hops(
-    graph: nx.Graph[GridPoint],
-    source: GridPoint,
-    target: GridPoint,
-) -> int:
-    """Returns unweighted hop distance, or a large value when unreachable."""
-    if source == target:
-        return 0
-
-    if source not in graph or target not in graph:
-        return 10**9
-
-    visited: set[GridPoint] = {source}
-    queue: deque[tuple[GridPoint, int]] = deque([(source, 0)])
-
-    while queue:
-        current_node, depth = queue.popleft()
-        for neighbor in graph.neighbors(current_node):
-            if neighbor in visited:
-                continue
-            if neighbor == target:
-                return depth + 1
-            visited.add(neighbor)
-            queue.append((neighbor, depth + 1))
-
-    return 10**9
-
-
 def _move_skips_unfilled_target_vertices(
     robot_id: int,
     current_position: GridPoint,
@@ -390,7 +351,7 @@ def _move_skips_unfilled_target_vertices(
     positions: RobotPositions,
     path_new: Sequence[GridPoint],
 ) -> bool:
-    """Implements Algorithm 2's sequential-formation rejection."""
+    """Algoritmo 2, linhas 1-3: rejeita salto na formacao sequencial."""
     if candidate_position not in path_new:
         return False
 
@@ -418,7 +379,7 @@ def _move_blocks_leader_immediate_advance(
     path_new: Sequence[GridPoint],
     leader_id: int,
 ) -> bool:
-    """Implements Algorithm 2's lead-robot priority rejection."""
+    """Algoritmo 2, linhas 4-6: rejeita bloqueio ao avanco imediato do lider."""
     if robot_id == leader_id or leader_id not in positions:
         return False
 
@@ -480,6 +441,8 @@ def _temporary_graph_connectivity_check(
     if base not in connectivity_graph:
         return False
 
+    # Algoritmo 2, linhas 8-9: Psim e Gtemp. Aqui o grafo temporario e
+    # montado com a base e as posicoes simuladas, incluindo o robo em pmid.
     temporary_graph: nx.Graph[ConnectivityPoint] = nx.Graph()
     all_positions: list[ConnectivityPoint] = [base, *positions]
     temporary_graph.add_nodes_from(all_positions)
@@ -528,6 +491,7 @@ def _temporary_graph_connectivity_check(
             if _has_graph_visibility(source_position, target_position):
                 temporary_graph.add_edge(source_position, target_position)
 
+    # Algoritmo 2, linha 10: checa se Gtemp conecta todos os robos a base.
     reachable: set[ConnectivityPoint] = {base}
     queue: deque[ConnectivityPoint] = deque([base])
 
@@ -550,9 +514,11 @@ def _temporary_midpoint_connectivity_to_base(
     connectivity_graph: nx.Graph[GridPoint],
     base: GridPoint,
 ) -> bool:
-    """Builds Algorithm 2's simulated midpoint state and checks base reachability."""
+    """Algoritmo 2, linhas 7-10: simula pmid e testa conexao ate a base."""
+    # Algoritmo 2, linha 7: pmid <- ponto medio entre pcurrent e pcandidate.
     movement_midpoint = midpoint(current_position, candidate_position)
     robot_ids = sorted(positions)
+    # Algoritmo 2, linha 8: Psim recebe o robo r em pmid e os demais parados.
     simulated_midpoint_positions: list[ConnectivityPoint] = [
         movement_midpoint
         if other_robot_id == robot_id
@@ -561,6 +527,8 @@ def _temporary_midpoint_connectivity_to_base(
     ]
 
     if grid_obj is not None:
+        # Algoritmo 2, linhas 9-10: constroi o grafo LOS temporario a partir
+        # de Psim e verifica se todos continuam alcancaveis a partir da base.
         return temporary_los_connectivity_check(
             grid_obj,
             simulated_midpoint_positions,
@@ -636,7 +604,7 @@ def _validate_move(
     connectivity_graph: nx.Graph[GridPoint],
     base: GridPoint,
 ) -> tuple[bool, str]:
-    """Validates a movement proposal under Algorithm 2 constraints."""
+    """Algoritmo 2: VALIDATEMOVE(r, pcurrent, pcandidate, P, Ptarget)."""
     if candidate_position == current_position:
         return False, "candidate is identical to current position"
 
@@ -647,6 +615,8 @@ def _validate_move(
     ):
         return False, "candidate is not an adjacent visibility-graph neighbor"
 
+    # Algoritmo 2, linhas 1-3: impede que r pule vertices do caminho-alvo que
+    # deveriam ser ocupados antes, preservando a formacao sequencial.
     if _move_skips_unfilled_target_vertices(
         robot_id,
         current_position,
@@ -656,6 +626,8 @@ def _validate_move(
     ):
         return False, "sequential formation violated"
 
+    # Algoritmo 2, linhas 4-6: impede que um robo bloqueie o proximo vertice
+    # que o robo lider precisa usar.
     if _move_blocks_leader_immediate_advance(
         robot_id,
         candidate_position,
@@ -665,6 +637,8 @@ def _validate_move(
     ):
         return False, "leader-priority rule violated"
 
+    # Extensao defensiva da implementacao: evita aceitar um movimento que
+    # saturaria todos os vertices futuros e produziria deadlock.
     if _deadlock_avoidance_violation(
         robot_id,
         current_position,
@@ -674,6 +648,8 @@ def _validate_move(
     ):
         return False, "deadlock-avoidance rule violated"
 
+    # Algoritmo 2, linhas 7-13: simula r em pmid, cria/verifica Gtemp e rejeita
+    # a proposta se a cadeia perder conectividade LOS com a base.
     if not _temporary_midpoint_connectivity_to_base(
         robot_id,
         current_position,
@@ -685,6 +661,8 @@ def _validate_move(
     ):
         return False, "temporary midpoint connectivity to base failed"
 
+    # Checagem final adicional: alem do meio do movimento, confirma que o estado
+    # final com r em pcandidate tambem continua conectado a base.
     simulated_positions = dict(positions)
     simulated_positions[robot_id] = candidate_position
     if not _final_positions_connected_to_base(
@@ -695,6 +673,7 @@ def _validate_move(
     ):
         return False, "final connectivity to base failed"
 
+    # Algoritmo 2, linha 14: candidato aprovado por todas as verificacoes.
     return True, "ok"
 
 
@@ -704,7 +683,7 @@ def _candidate_positions_for_robot(
     path_new: Sequence[GridPoint],
     connectivity_graph: nx.Graph[GridPoint],
 ) -> list[GridPoint]:
-    """Generates one-step candidates toward the robot's assigned path target."""
+    """Algoritmo 1, linha 3: gera pcand para r em direcao a Ptarget."""
     target_index = _target_path_index_for_robot(robot_id, path_new)
 
     if current_position in path_new:
@@ -784,21 +763,24 @@ def _select_best_candidate_move(
     base: GridPoint,
     frozen_robot_ids: set[int],
 ) -> tuple[int, GridPoint, GridPoint] | None:
-    """Selects the next global adaptive move from all valid robot candidates."""
+    """Algoritmo 1, linhas 2-5: avalia robos, candidatos e VALIDATEMOVE."""
     best_move: tuple[int, GridPoint, GridPoint] | None = None
     best_score: tuple[float, ...] | None = None
 
+    # Algoritmo 1, linha 2: "for each robot r in P".
     for robot_id in sorted(positions):
         if robot_id in frozen_robot_ids:
             continue
 
         current_position = positions[robot_id]
+        # Algoritmo 1, linha 3: gera movimentos candidatos pcand para r.
         for candidate_position in _candidate_positions_for_robot(
             robot_id,
             current_position,
             path_new,
             connectivity_graph,
         ):
+            # Algoritmo 1, linha 4: isSafe <- VALIDATEMOVE(...).
             is_valid, _ = _validate_move(
                 robot_id,
                 current_position,
@@ -811,8 +793,12 @@ def _select_best_candidate_move(
                 base,
             )
             if not is_valid:
+                # Algoritmo 1, linhas 8-9: candidato inseguro; r permanece na
+                # posicao atual e o candidato nao entra na disputa.
                 continue
 
+            # Algoritmo 1, linha 5: apenas candidatos isSafe participam da
+            # selecao do movimento que sera executado neste snapshot.
             score = _candidate_move_score(
                 robot_id,
                 current_position,
@@ -839,7 +825,7 @@ def _blocked_candidate_attempts(
     base: GridPoint,
     frozen_robot_ids: set[int],
 ) -> list[tuple[int, GridPoint, GridPoint, str]]:
-    """Returns representative rejected candidates for deadlock diagnostics."""
+    """Algoritmo 1, linhas 8-9: registra candidatos rejeitados como "stay"."""
     blocked_attempts: list[tuple[int, GridPoint, GridPoint, str]] = []
 
     for robot_id in sorted(positions):
@@ -876,89 +862,6 @@ def _blocked_candidate_attempts(
                 break
 
     return blocked_attempts
-
-
-def _acquisition_heuristic(
-    robot_id: int,
-    current_position: GridPoint,
-    path_new: Sequence[GridPoint],
-    positions: RobotPositions,
-    leader_id: int,
-    grid_obj: MapGrid | None,
-    connectivity_graph: nx.Graph[GridPoint],
-    base: GridPoint,
-) -> GridPoint | None:
-    """Selects the best acquisition move for robots outside `path_new`.
-
-    Candidate neighbors are ranked by:
-    1. Preference for entering the replanned path.
-    2. Minimum hop distance to the next missing path vertex.
-    3. Maximum reachable progress along `path_new`.
-    4. Minimum single-step travel distance.
-    5. Minimum distance to the goal vertex.
-    """
-    if current_position not in connectivity_graph:
-        return None
-
-    goal = path_new[-1]
-    best_candidate: GridPoint | None = None
-    occupied_vertices = set(positions.values())
-    frontier_vertex = _first_unoccupied_path_vertex(path_new, occupied_vertices)
-    best_score = (
-        float("-inf"),
-        float("-inf"),
-        float("-inf"),
-        float("-inf"),
-        float("-inf"),
-    )
-
-    for candidate_position in connectivity_graph.neighbors(current_position):
-        is_valid, _ = _validate_move(
-            robot_id,
-            current_position,
-            candidate_position,
-            positions,
-            path_new,
-            leader_id,
-            grid_obj,
-            connectivity_graph,
-            base,
-        )
-        if not is_valid:
-            continue
-
-        path_progress = _max_path_progress_reachable(
-            connectivity_graph,
-            candidate_position,
-            path_new,
-        )
-        candidate_on_path = 1.0 if candidate_position in path_new else 0.0
-        frontier_hops = float(
-            _shortest_hops(
-                connectivity_graph,
-                candidate_position,
-                frontier_vertex,
-            )
-        )
-        step_distance = _euclidean_distance(current_position, candidate_position)
-        goal_distance = _euclidean_distance(candidate_position, goal)
-        score = (
-            candidate_on_path,
-            -frontier_hops,
-            float(path_progress),
-            -step_distance,
-            -goal_distance,
-        )
-
-        if (
-            best_candidate is None
-            or score > best_score
-            or (score == best_score and candidate_position < best_candidate)
-        ):
-            best_score = score
-            best_candidate = candidate_position
-
-    return best_candidate
 
 
 def _append_snapshot(
@@ -1058,6 +961,9 @@ def reactive_replan(
     seen_states: set[tuple[GridPoint, ...]] = set()
 
     def _termination_reached() -> bool:
+        # Algoritmo 1, linha 1: a condicao "goal is reached" so e verdadeira
+        # quando o lider chegou ao goal, o caminho-alvo foi preenchido e a
+        # cadeia inteira ainda esta conectada a base.
         occupied_vertices = set(positions.values())
         target_path_is_filled = all(
             path_vertex in occupied_vertices for path_vertex in path_new[1:]
@@ -1074,6 +980,7 @@ def reactive_replan(
         )
 
     step = 0
+    # Algoritmo 1, linha 1: while goal is not reached do.
     while not _termination_reached() and step < max_steps:
         state_key = tuple(positions[robot_id] for robot_id in range(n_robots))
         if state_key in seen_states:
@@ -1091,6 +998,9 @@ def reactive_replan(
             break
         seen_states.add(state_key)
 
+        # Algoritmo 1, linhas 2-5: percorre os robos, gera pcand e chama
+        # VALIDATEMOVE. Esta implementacao executa um movimento valido por
+        # snapshot para manter a simulacao atomica e rastreavel.
         selected_move = _select_best_candidate_move(
             positions,
             path_new,
@@ -1102,6 +1012,8 @@ def reactive_replan(
         )
 
         if selected_move is None:
+            # Algoritmo 1, linhas 8-9: se nenhum pcand seguro existir, os robos
+            # ficam nas posicoes atuais e o bloqueio e registrado.
             if record_blocked_attempts:
                 for (
                     robot_id,
@@ -1150,6 +1062,8 @@ def reactive_replan(
 
         robot_id, current_position, candidate_position = selected_move
         step += 1
+        # Algoritmo 1, linhas 6-7: executa o movimento aceito para pcand e
+        # atualiza P com a nova posicao do robo.
         positions[robot_id] = candidate_position
         _append_snapshot(
             snapshots,

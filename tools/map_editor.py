@@ -17,16 +17,17 @@ from __future__ import annotations
 
 import keyword
 from dataclasses import dataclass
-from pathlib import Path
 import re
-import sys
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from typing import Any, Callable, cast
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from tools._bootstrap import PROJECT_ROOT, ensure_project_root_on_path
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import PROJECT_ROOT, ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 from core.map_grid import MapGrid
 from presets.map_catalog import (

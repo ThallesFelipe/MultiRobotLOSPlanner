@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multirobot-los-planner"
+version = "0.1.0"
+description = "Line-of-sight constrained multi-robot relay path planning tools."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.10",
+    "networkx>=3.6",
+    "numpy>=2.4",
+    "scipy>=1.17",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+]
+opencv = [
+    "opencv-python>=4.10",
+]
+
+[project.scripts]
+multirobot-los-menu = "tools.terminal_menu:main"
+multirobot-los-map-editor = "tools.map_editor:main"
+multirobot-los-export-map = "tools.export_map_visualization:main"
+multirobot-los-export-graph = "tools.export_visibility_graph:main"
+multirobot-los-plan-path = "tools.export_planned_path:main"
+multirobot-los-replanner = "tools.interactive_replanner:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["algorithms*", "core*", "presets*", "tools*"]
+
+[tool.setuptools.package-data]
+presets = ["maps_catalog.json"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["."]
+testpaths = ["tests"]

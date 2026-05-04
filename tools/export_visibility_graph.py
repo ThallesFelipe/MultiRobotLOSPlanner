@@ -14,38 +14,36 @@ Examples:
 from __future__ import annotations
 
 import argparse
-from importlib import import_module
-import math
 from pathlib import Path
 import sys
-from types import ModuleType
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import networkx as nx
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from tools._bootstrap import ensure_project_root_on_path
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import ensure_project_root_on_path
+
+ensure_project_root_on_path()
 
 from core.map_grid import MapGrid
-from core.map_processor import MapProcessor
-from core.visibility_graph import build_visibility_graph
-from presets.map_catalog import (
-    DEFAULT_CATALOG_PATH,
-    create_map_from_catalog,
-    list_catalog_maps,
+from presets.map_catalog import DEFAULT_CATALOG_PATH
+from tools.common import (
+    DEFAULT_FACTORY_NAME,
+    build_visibility_graph_with_source,
+    coerce_max_vertices,
+    default_output_path,
+    load_matplotlib_modules,
+    load_map,
+    normalize_optional_map_name,
+    prompt_positive_int,
+    prompt_yes_no,
+    select_catalog_or_preset,
 )
 
 
-class MapFactory(Protocol):
-    """Callable signature for Python preset map factory functions."""
-
-    def __call__(self, scale_factor: int = 1) -> MapGrid:
-        ...
-
-
 DEFAULT_MAP_NAME = "map1"
-DEFAULT_FACTORY_NAME = "create_custom_map"
 DEFAULT_SCALE_FACTOR = 1
 DEFAULT_DPI = 220
 DEFAULT_VERTEX_SOURCE = "boundary"
@@ -58,104 +56,9 @@ EDGE_COLOR = "#C0681B"
 VERTEX_COLOR = "#1F4D3A"
 
 
-def _load_python_factory(module_name: str, factory_name: str) -> MapFactory:
-    """Loads map factory from a Python preset module."""
-    try:
-        module: ModuleType = import_module(module_name)
-    except ModuleNotFoundError as exc:
-        raise ValueError(f"Nao foi possivel importar modulo: {module_name!r}.") from exc
-
-    factory = getattr(module, factory_name, None)
-    if factory is None:
-        raise ValueError(
-            f"Funcao {factory_name!r} nao encontrada no modulo {module_name!r}."
-        )
-    if not callable(factory):
-        raise ValueError(
-            f"Atributo {factory_name!r} em {module_name!r} nao e chamavel."
-        )
-
-    return cast(MapFactory, factory)
-
-
 def _default_output_path(source_name: str) -> Path:
     """Builds default output PNG path from map source name."""
-    safe_name = source_name.replace(":", "_").replace(".", "_")
-    return Path("exports") / f"{safe_name}_visibility_graph.png"
-
-
-def _load_map(
-    map_name: str | None,
-    catalog_path: Path,
-    preset_module: str | None,
-    factory_name: str,
-    scale_factor: int,
-) -> tuple[MapGrid, str]:
-    """Loads map from JSON catalog (preferred) or Python preset module."""
-    if map_name is not None:
-        map_grid = create_map_from_catalog(
-            map_name=map_name,
-            scale_factor=scale_factor,
-            catalog_path=catalog_path,
-        )
-        return (map_grid, f"catalog_{map_name}")
-
-    if preset_module is None:
-        raise ValueError("Informe --map-name ou --preset-module.")
-
-    factory = _load_python_factory(preset_module, factory_name)
-    map_grid = factory(scale_factor=scale_factor)
-    return (map_grid, f"{preset_module}_{factory_name}")
-
-
-def _extract_boundary_vertices(
-    map_grid: MapGrid,
-    boundary_stride: int,
-    max_vertices: int | None,
-) -> list[tuple[int, int]]:
-    """Extracts free-space boundary vertices with optional stride and cap.
-
-    Boundary cells are free cells with at least one 8-neighbor obstacle cell.
-    """
-    if boundary_stride <= 0:
-        raise ValueError("boundary_stride must be greater than 0.")
-
-    rows = map_grid.rows
-    cols = map_grid.cols
-    vertices: list[tuple[int, int]] = []
-
-    for row in range(rows):
-        for col in range(cols):
-            if not map_grid.is_free(row, col):
-                continue
-            if ((row + col) % boundary_stride) != 0:
-                continue
-
-            has_obstacle_neighbor = False
-            for delta_row in (-1, 0, 1):
-                for delta_col in (-1, 0, 1):
-                    if delta_row == 0 and delta_col == 0:
-                        continue
-
-                    neighbor_row = row + delta_row
-                    neighbor_col = col + delta_col
-                    if not map_grid.in_bounds(neighbor_row, neighbor_col):
-                        continue
-                    if not map_grid.is_free(neighbor_row, neighbor_col):
-                        has_obstacle_neighbor = True
-                        break
-
-                if has_obstacle_neighbor:
-                    break
-
-            if has_obstacle_neighbor:
-                vertices.append((row, col))
-
-    if max_vertices is not None and len(vertices) > max_vertices:
-        sampling_step = int(math.ceil(len(vertices) / max_vertices))
-        vertices = vertices[::sampling_step]
-
-    return vertices
+    return default_output_path(source_name, "visibility_graph")
 
 
 def _build_visibility_graph_with_source(
@@ -165,20 +68,12 @@ def _build_visibility_graph_with_source(
     max_vertices: int | None,
 ) -> nx.Graph[tuple[int, int]]:
     """Builds visibility graph from selected vertex source strategy."""
-    if vertex_source == "processor":
-        processor = MapProcessor(map_grid)
-        return processor.build_initial_visibility_graph()
-
-    if vertex_source == "boundary":
-        vertices = _extract_boundary_vertices(
-            map_grid=map_grid,
-            boundary_stride=boundary_stride,
-            max_vertices=max_vertices,
-        )
-        return build_visibility_graph(map_grid, vertices)
-
-    raise ValueError(
-        f"Unknown vertex_source={vertex_source!r}. Use 'processor' or 'boundary'."
+    return build_visibility_graph_with_source(
+        map_grid=map_grid,
+        vertex_source=vertex_source,
+        boundary_stride=boundary_stride,
+        max_vertices=max_vertices,
+        sampling_mode="ceil",
     )
 
 
@@ -192,13 +87,7 @@ def _render_visibility_graph(
     show_vertices: bool,
 ) -> None:
     """Renders occupancy grid + all visibility graph edges to PNG."""
-    try:
-        plt = cast(Any, import_module("matplotlib.pyplot"))
-        colors_module = cast(Any, import_module("matplotlib.colors"))
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "matplotlib nao encontrado. Instale com: pip install matplotlib"
-        ) from exc
+    plt, colors_module = load_matplotlib_modules()
 
     listed_colormap = colors_module.ListedColormap
 
@@ -265,94 +154,11 @@ def _render_visibility_graph(
     plt.close(fig)
 
 
-def _prompt_positive_int(label: str, default: int, *, allow_zero: bool = False) -> int:
-    """Reads a numeric option from terminal input."""
-    while True:
-        raw_value = input(f"{label} [{default}]: ").strip()
-        if not raw_value:
-            return default
-
-        try:
-            parsed_value = int(raw_value)
-        except ValueError:
-            print("Valor invalido. Digite um numero inteiro.")
-            continue
-
-        if allow_zero and parsed_value == 0:
-            return parsed_value
-        if parsed_value <= 0:
-            print("Valor invalido. Digite um inteiro positivo.")
-            continue
-        return parsed_value
-
-
-def _prompt_yes_no(label: str, default: bool) -> bool:
-    """Prompts a yes/no question and returns the resulting boolean."""
-    suffix = "S/n" if default else "s/N"
-    while True:
-        raw_value = input(f"{label} [{suffix}]: ").strip().lower()
-        if not raw_value:
-            return default
-        if raw_value in {"s", "sim", "y", "yes"}:
-            return True
-        if raw_value in {"n", "nao", "no"}:
-            return False
-        print("Resposta invalida. Digite s ou n.")
-
-
-def _prompt_map_name(catalog_path: Path, default_map_name: str | None) -> str:
-    """Displays catalog maps and returns the chosen map name."""
-    available_maps = list_catalog_maps(catalog_path)
-    if not available_maps:
-        raise ValueError(
-            "Catalogo vazio. Adicione mapas em presets/maps_catalog.json "
-            "ou use --preset-module."
-        )
-
-    if default_map_name in available_maps:
-        selected_default_map = default_map_name
-    else:
-        selected_default_map = available_maps[0]
-    default_index = available_maps.index(selected_default_map) + 1
-
-    print("\nMapas disponiveis no catalogo:")
-    for index, map_name in enumerate(available_maps, start=1):
-        print(f"  [{index}] {map_name}")
-
-    while True:
-        raw_value = input(
-            f"Escolha o mapa (numero ou nome) [padrao: {default_index}]: "
-        ).strip()
-        if not raw_value:
-            return selected_default_map
-
-        if raw_value.isdigit():
-            map_index = int(raw_value)
-            if 1 <= map_index <= len(available_maps):
-                return available_maps[map_index - 1]
-
-        if raw_value in available_maps:
-            return raw_value
-
-        print("Opcao invalida. Digite um numero da lista ou o nome do mapa.")
-
-
 def _collect_interactive_inputs(args: argparse.Namespace) -> argparse.Namespace:
     """Collects interactive options to avoid long command lines."""
     print("\n=== Exportador de Grafo de Visibilidade ===")
 
-    available_maps = list_catalog_maps(args.catalog_path)
-    if available_maps:
-        args.map_name = _prompt_map_name(args.catalog_path, args.map_name)
-        args.preset_module = None
-    else:
-        print("Catalogo sem mapas. Usando modo legado por modulo Python.")
-        args.map_name = None
-        default_module = args.preset_module or "presets.map1"
-        preset_module = input(
-            f"Modulo preset Python [{default_module}]: "
-        ).strip()
-        args.preset_module = preset_module if preset_module else default_module
+    select_catalog_or_preset(args)
 
     while True:
         vertex_source = input(
@@ -366,20 +172,20 @@ def _collect_interactive_inputs(args: argparse.Namespace) -> argparse.Namespace:
         print("Opcao invalida. Use boundary ou processor.")
 
     if args.vertex_source == "boundary":
-        args.boundary_stride = _prompt_positive_int(
+        args.boundary_stride = prompt_positive_int(
             "Boundary stride",
             args.boundary_stride,
         )
-        args.max_vertices = _prompt_positive_int(
+        args.max_vertices = prompt_positive_int(
             "Max vertices (0 para sem limite)",
             args.max_vertices,
             allow_zero=True,
         )
 
-    args.scale_factor = _prompt_positive_int("Scale factor", args.scale_factor)
-    args.dpi = _prompt_positive_int("DPI", args.dpi)
-    args.show_grid = _prompt_yes_no("Mostrar grade", args.show_grid)
-    args.show_vertices = _prompt_yes_no("Mostrar vertices", args.show_vertices)
+    args.scale_factor = prompt_positive_int("Scale factor", args.scale_factor)
+    args.dpi = prompt_positive_int("DPI", args.dpi)
+    args.show_grid = prompt_yes_no("Mostrar grade", args.show_grid)
+    args.show_vertices = prompt_yes_no("Mostrar vertices", args.show_vertices)
 
     output_value = input(
         "Arquivo PNG de saida (Enter para caminho automatico): "
@@ -501,17 +307,11 @@ def main() -> None:
     if args.boundary_stride <= 0:
         raise ValueError("--boundary-stride deve ser inteiro positivo.")
 
-    max_vertices: int | None
-    if args.max_vertices <= 0:
-        max_vertices = None
-    else:
-        max_vertices = args.max_vertices
+    max_vertices = coerce_max_vertices(args.max_vertices)
 
-    map_name: str | None = args.map_name.strip() if args.map_name is not None else None
-    if map_name == "":
-        map_name = None
+    map_name = normalize_optional_map_name(args.map_name)
 
-    map_grid, source_name = _load_map(
+    map_grid, source_name = load_map(
         map_name=map_name,
         catalog_path=args.catalog_path,
         preset_module=args.preset_module,

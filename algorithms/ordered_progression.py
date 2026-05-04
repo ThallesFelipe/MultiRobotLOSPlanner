@@ -58,27 +58,29 @@ def _preserves_leader_front_sequential_formation(
     moving_robot_id: int,
     candidate_progress: int,
 ) -> bool:
-    """Validates a candidate move against leader-front sequential formation.
+    """Algoritmo 2, linhas 1-6: valida formacao e prioridade do lider.
 
     Formation invariants:
     - r0 is never behind any follower.
-    - Progress is sequential: for each adjacent pair (ri, r{i+1}), 0 <= progress[ri] - progress[r{i+1}] <= 1.
+    - Adjacent robot progress differs by at most one path vertex.
     """
     simulated_progress = dict(progress)
     simulated_progress[moving_robot_id] = candidate_progress
-    
+
     n_robots = len(simulated_progress)
-    ordered_progression = [simulated_progress[robot_id] for robot_id in range(n_robots)]
-    
+    ordered_progression = [
+        simulated_progress[robot_id] for robot_id in range(n_robots)
+    ]
+
     for leader_index in range(n_robots - 1):
         leader_progress = ordered_progression[leader_index]
         follower_progress = ordered_progression[leader_index + 1]
-        
+
         if leader_progress < follower_progress:
             return False
         if leader_progress - follower_progress > 1:
             return False
-    
+
     return True
 
 
@@ -131,6 +133,12 @@ def ordered_progression(
 ) -> list[MovementSnapshot]:
     """Generates deterministic movement snapshots for the relay chain.
 
+    Mapeamento do pseudo-codigo do artigo:
+    - Algoritmo 1: o `for step, robot_id in enumerate(sequence, ...)` executa
+      a movimentacao coordenada ate todos os vertices do caminho serem ocupados.
+    - Algoritmo 2: os blocos `valid` abaixo fazem a validacao de formacao,
+      conectividade no ponto medio e conectividade final antes de mover o robo.
+
     Args:
         path: Ordered path `[base, n1, ..., nk, goal]` selected for deployment.
         grid_obj: Occupancy grid used for midpoint LOS validation.
@@ -153,10 +161,13 @@ def ordered_progression(
             f"path requires {required_robot_count}, received {n_robots}."
         )
 
+    # Algoritmo 1, entrada P: todos os robos comecam na base do caminho-alvo.
     positions: RobotPositions = {robot_id: path[0] for robot_id in range(n_robots)}
     progress: dict[int, int] = {robot_id: 0 for robot_id in range(n_robots)}
 
     expected_move_count = total_moves_formula(n_nodes)
+    # Algoritmo 1, linhas 1-2: a sequencia deterministica substitui o while +
+    # for each robot do artigo para o caso de planejamento ordenado.
     sequence = deterministic_sequence(n_nodes)
     if len(sequence) != expected_move_count:
         raise RuntimeError(
@@ -177,7 +188,8 @@ def ordered_progression(
             ),
         }
     ]
-    
+
+    # Algoritmo 1, linha 1: repete ate a sequencia preencher o caminho-alvo.
     for step, robot_id in enumerate(sequence, start=1):
         current_pos = positions[robot_id]
         current_progress = progress[robot_id]
@@ -200,18 +212,24 @@ def ordered_progression(
             )
             continue
 
+        # Algoritmo 1, linha 3: pcand e o proximo vertice do Ptarget para r.
         next_pos = path[next_progress]
         valid = True
         reason = ""
-        
+
+        # Algoritmo 1, linha 4 + Algoritmo 2, linhas 1-6:
+        # VALIDATEMOVE com regras de formacao sequencial e prioridade do lider.
         if not _preserves_leader_front_sequential_formation(
             progress,
             robot_id,
-            next_progress):
+            next_progress,
+        ):
             valid = False
             reason = "leader-front sequential formation violated"
 
         if valid and grid_obj is not None:
+            # Algoritmo 2, linhas 7-10: valida LOS do ponto medio do movimento
+            # com a cadeia estatica antes de aprovar a transicao.
             static_positions = [
                 positions[index]
                 for index in range(n_robots)
@@ -227,6 +245,8 @@ def ordered_progression(
                 reason = "midpoint LOS to static chain failed"
 
         if valid and grid_obj is not None:
+            # Algoritmo 2, linhas 7-13: pmid, Psim, Gtemp e teste de conexao
+            # ate a base durante o movimento.
             midpoint = _midpoint(current_pos, next_pos)
             simulated_midpoint_positions: list[ConnectivityPoint] = [
                 midpoint if index == robot_id else positions[index]
@@ -241,6 +261,8 @@ def ordered_progression(
                 reason = "temporary LOS connectivity to base failed"
 
         if valid and vis_graph is not None:
+            # Algoritmo 2, linhas 9-13: checagem em grafo de visibilidade para
+            # garantir que o estado final tambem conecta todos os robos a base.
             simulated_final_positions = dict(positions)
             simulated_final_positions[robot_id] = next_pos
             if not _bfs_connected(
@@ -252,12 +274,16 @@ def ordered_progression(
                 reason = "visibility-graph BFS connectivity failed"
 
         if valid:
+            # Algoritmo 1, linhas 5-7 e Algoritmo 2, linha 14: candidato seguro;
+            # executa o movimento e atualiza P/progress.
             positions[robot_id] = next_pos
             progress[robot_id] = next_progress
             description = (
                 f"Step {step}: r{robot_id + 1} moves {current_pos}->{next_pos}"
             )
         else:
+            # Algoritmo 1, linhas 8-9: movimento rejeitado; robo permanece onde
+            # estava e o snapshot registra o motivo.
             description = (
                 f"Step {step}: r{robot_id + 1} blocked ({reason}) at "
                 f"{current_pos}"

@@ -1,0 +1,4 @@
+matplotlib>=3.10
+networkx>=3.6
+numpy>=2.4
+scipy>=1.17
