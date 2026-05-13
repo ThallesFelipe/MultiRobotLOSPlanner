@@ -116,12 +116,6 @@ def has_line_of_sight(
             f"received tolerance={tolerance}."
         )
 
-    if diagonal_flank_policy not in ("both", "either"):
-        raise ValueError(
-            "Diagonal flank policy must be either 'both' or 'either'; "
-            f"received diagonal_flank_policy={diagonal_flank_policy!r}."
-        )
-
     if not grid.in_bounds(*p1) or not grid.in_bounds(*p2):
         return False
 
@@ -134,14 +128,11 @@ def has_line_of_sight(
         for row_index, col_index in bresenham(*start_point, *end_point):
             current_point: GridPoint = (row_index, col_index)
 
-            if (
-                previous_point is not None
-                and _is_blocked_diagonal_transition(
-                    grid,
-                    previous_point,
-                    current_point,
-                    diagonal_flank_policy,
-                )
+            if previous_point is not None and _is_blocked_diagonal_transition(
+                grid,
+                previous_point,
+                current_point,
+                diagonal_flank_policy,
             ):
                 obstacle_intersections += 1
                 if obstacle_intersections > tolerance:
@@ -156,4 +147,6 @@ def has_line_of_sight(
 
         return True
 
-    return _has_line_of_sight_one_direction(p1, p2) and _has_line_of_sight_one_direction(p2, p1)
+    return _has_line_of_sight_one_direction(
+        p1, p2
+    ) and _has_line_of_sight_one_direction(p2, p1)

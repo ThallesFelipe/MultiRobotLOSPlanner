@@ -28,7 +28,7 @@ def relay_dijkstra(
     source: NodeT,
     target: NodeT,
     lam: float = DEFAULT_RELAY_PENALTY_LAMBDA,
-    prefer_fewer_relays: bool = False,
+    prefer_fewer_relays: bool = True,
 ) -> tuple[float, list[NodeT]]:
     """Computes a minimum-cost path with relay penalty over a weighted graph.
 
@@ -61,6 +61,7 @@ def relay_dijkstra(
     tie_breaker_counter = 0
 
     if prefer_fewer_relays:
+
         def push_fewer_relay_candidate(
             priority_queue: list[tuple[int, float, float, int, NodeT, list[NodeT]]],
             traversed_edge_count: int,

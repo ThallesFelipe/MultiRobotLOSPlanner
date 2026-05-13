@@ -16,6 +16,8 @@ Usage:
     python tools/interactive_replanner.py
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import tkinter as tk
@@ -25,7 +27,7 @@ from typing import Any, Callable, cast
 
 try:
     from tools._bootstrap import ensure_project_root_on_path
-except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+except ModuleNotFoundError:
     from _bootstrap import ensure_project_root_on_path
 
 ensure_project_root_on_path()
@@ -39,15 +41,15 @@ import numpy as np
 from matplotlib import colors as mcolors
 from matplotlib import patches as mpatches
 from matplotlib.backend_bases import Event, MouseEvent
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends._backend_tk import NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from algorithms.connectivity_checks import temporary_los_connectivity_check
 from algorithms.ordered_progression import (
     MovementSnapshot,
     ordered_progression,
 )
-from algorithms.connectivity_checks import temporary_los_connectivity_check
 from algorithms.reactive_replanning import reactive_replanning
 from algorithms.relay_dijkstra import (
     DEFAULT_RELAY_PENALTY_LAMBDA,
@@ -94,8 +96,9 @@ DEFAULT_MAX_VERTICES = 600
 DEFAULT_STEP_DELAY_MS = 350
 DEFAULT_OBSTACLE_RADIUS = 1
 DEFAULT_PLAN_PREFER_FEWER_RELAYS = False
-DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY: DiagonalFlankPolicy = DEFAULT_DIAGONAL_FLANK_POLICY
-DEFAULT_FLEET_ROBOT_COUNT = 4
+DEFAULT_RUNTIME_DIAGONAL_FLANK_POLICY: DiagonalFlankPolicy = (
+    DEFAULT_DIAGONAL_FLANK_POLICY
+)
 
 
 def _euclidean_distance(p1: GridPoint, p2: GridPoint) -> float:
@@ -207,9 +210,7 @@ class InteractiveReplannerApp(tk.Tk):
         ttk.Button(top, text="Carregar mapa", command=self._on_load_map).pack(
             side=tk.LEFT
         )
-        ttk.Separator(top, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=8
-        )
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
         ttk.Label(top, text="Clique define:").pack(side=tk.LEFT)
         for label, value in (
@@ -234,12 +235,10 @@ class InteractiveReplannerApp(tk.Tk):
             width=4,
         ).pack(side=tk.LEFT)
 
-        ttk.Separator(top, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=8
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(top, text="Planejar (Ordered)", command=self._on_plan).pack(
+            side=tk.LEFT, padx=2
         )
-        ttk.Button(
-            top, text="Planejar (Ordered)", command=self._on_plan
-        ).pack(side=tk.LEFT, padx=2)
         ttk.Button(top, text="⏮", width=3, command=self._on_first).pack(
             side=tk.LEFT, padx=1
         )
@@ -267,9 +266,7 @@ class InteractiveReplannerApp(tk.Tk):
             width=6,
         ).pack(side=tk.LEFT)
 
-        ttk.Separator(top, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=8
-        )
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Button(
             top, text="Limpar obstáculos", command=self._on_clear_obstacles
         ).pack(side=tk.LEFT, padx=2)
@@ -323,9 +320,7 @@ class InteractiveReplannerApp(tk.Tk):
 
         status_bar = ttk.Frame(self, padding=4)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        ttk.Label(status_bar, textvariable=self.status_var, anchor=tk.W).pack(
-            fill=tk.X
-        )
+        ttk.Label(status_bar, textvariable=self.status_var, anchor=tk.W).pack(fill=tk.X)
 
     def _refresh_map_list(self) -> None:
         try:
@@ -363,8 +358,12 @@ class InteractiveReplannerApp(tk.Tk):
         self.replanning_active = False
         self._stop_playback()
 
-        self._log(f"Mapa '{map_name}' carregado ({map_grid.rows}x{map_grid.cols}).", "info")
-        self._set_status("Mapa carregado. Clique no mapa para definir origem e destino.")
+        self._log(
+            f"Mapa '{map_name}' carregado ({map_grid.rows}x{map_grid.cols}).", "info"
+        )
+        self._set_status(
+            "Mapa carregado. Clique no mapa para definir origem e destino."
+        )
 
         self._log(
             "Construindo grafo de visibilidade (Canny/cantos/DBSCAN + passagens livres)...",
@@ -422,7 +421,9 @@ class InteractiveReplannerApp(tk.Tk):
     def _set_source(self, point: GridPoint) -> None:
         assert self.map_grid is not None
         if self._is_blocked_cell(point):
-            self._log(f"Origem {point} cai em obstáculo; escolha célula livre.", "error")
+            self._log(
+                f"Origem {point} cai em obstáculo; escolha célula livre.", "error"
+            )
             return
         self.source_point = point
         self._log(f"Origem definida em {point}.", "info")
@@ -433,7 +434,9 @@ class InteractiveReplannerApp(tk.Tk):
     def _set_target(self, point: GridPoint) -> None:
         assert self.map_grid is not None
         if self._is_blocked_cell(point):
-            self._log(f"Destino {point} cai em obstáculo; escolha célula livre.", "error")
+            self._log(
+                f"Destino {point} cai em obstáculo; escolha célula livre.", "error"
+            )
             return
         self.target_point = point
         self._log(f"Destino definido em {point}.", "info")
@@ -483,11 +486,7 @@ class InteractiveReplannerApp(tk.Tk):
 
     def _count_blocked_steps(self, snapshots: list[MovementSnapshot]) -> int:
         """Counts blocked movement attempts, excluding the initial snapshot."""
-        return sum(
-            1
-            for snapshot in snapshots[1:]
-            if not snapshot["valid"]
-        )
+        return sum(1 for snapshot in snapshots[1:] if not snapshot["valid"])
 
     def _count_valid_robot_moves(self, snapshots: list[MovementSnapshot]) -> int:
         """Counts effective robot displacements, excluding blocked attempts."""
@@ -515,7 +514,7 @@ class InteractiveReplannerApp(tk.Tk):
         if cost == INFINITE_PATH_COST or not path:
             return None
 
-        robot_count = max(DEFAULT_FLEET_ROBOT_COUNT, len(path) - 1)
+        robot_count = len(path) - 1
         snapshots = ordered_progression(
             path,
             grid_obj=self.map_grid,
@@ -560,9 +559,7 @@ class InteractiveReplannerApp(tk.Tk):
 
         self._stop_playback()
         self.pending_obstacle_events.clear()
-        self._log(
-            "=== Planejamento inicial (ordered_progression) ===", "info"
-        )
+        self._log("=== Planejamento inicial (ordered_progression) ===", "info")
         self._log(
             "Construindo grafo para o estado atual do mapa (inclui obstáculos dinâmicos).",
             "info",
@@ -604,7 +601,9 @@ class InteractiveReplannerApp(tk.Tk):
                 "warn",
             )
 
-        self._install_snapshots(snapshots, f"ordered_progression ({len(snapshots) - 1} movimentos)")
+        self._install_snapshots(
+            snapshots, f"ordered_progression ({len(snapshots) - 1} movimentos)"
+        )
 
     def _install_snapshots(self, snapshots: list[MovementSnapshot], label: str) -> None:
         """Installs a snapshot sequence and resets the playback cursor."""
@@ -642,7 +641,10 @@ class InteractiveReplannerApp(tk.Tk):
         )
 
     def _start_playback(self) -> None:
-        if self._has_terminal_failure() and self.current_snapshot_index >= len(self.snapshots) - 1:
+        if (
+            self._has_terminal_failure()
+            and self.current_snapshot_index >= len(self.snapshots) - 1
+        ):
             return
         if self.current_snapshot_index >= len(self.snapshots) - 1:
             self.current_snapshot_index = 0
@@ -776,7 +778,9 @@ class InteractiveReplannerApp(tk.Tk):
             f"em {obstacle_point}. Disparando reactive_replanning.",
             "warn",
         )
-        self._set_status("Líder encontrou obstáculo. Replanejamento reativo em execução...")
+        self._set_status(
+            "Líder encontrou obstáculo. Replanejamento reativo em execução..."
+        )
         self._stop_playback()
         self.pending_obstacle_events.clear()
         self._trigger_reactive_replanning(obstacle_point)
@@ -915,7 +919,9 @@ class InteractiveReplannerApp(tk.Tk):
         assert self.map_grid is not None
         assert self.source_point is not None and self.target_point is not None
 
-        self._log("Reconstruindo grafo de visibilidade com obstáculos atualizados...", "info")
+        self._log(
+            "Reconstruindo grafo de visibilidade com obstáculos atualizados...", "info"
+        )
         new_base_graph = self._build_planning_graph_for_current_map(
             extra_vertices={obstacle_point}
         )
@@ -973,6 +979,7 @@ class InteractiveReplannerApp(tk.Tk):
                 obstacle_point=obstacle_point,
                 grid_obj=self.map_grid,
                 lam=DEFAULT_RELAY_PENALTY_LAMBDA,
+                allow_new_robots=True,
                 record_blocked_attempts=False,
             )
         except Exception as exc:
@@ -1002,10 +1009,20 @@ class InteractiveReplannerApp(tk.Tk):
 
         self.replanning_active = True
         self.current_path = list(new_path)
-        self._log(
-            f"Novo plano: {len(new_path)} vertices, custo={cost:.3f}.", "info"
-        )
+        self._log(f"Novo plano: {len(new_path)} vertices, custo={cost:.3f}.", "info")
         self._log(f"Path: {new_path}", "step")
+        replanned_robot_count = (
+            len(new_snapshots[0]["positions"])
+            if new_snapshots
+            else len(initial_positions)
+        )
+        added_robot_count = replanned_robot_count - len(initial_positions)
+        if added_robot_count > 0:
+            self._log(
+                f"Replanning adicionou {added_robot_count} robô(s) na origem "
+                f"{self.source_point} para preencher a nova cadeia.",
+                "info",
+            )
         effective_moves = self._count_valid_robot_moves(new_snapshots)
         self._install_snapshots(
             new_snapshots,
@@ -1063,9 +1080,7 @@ class InteractiveReplannerApp(tk.Tk):
 
     def _log_snapshot(self, snapshot: MovementSnapshot) -> None:
         level = "step" if snapshot["valid"] else "warn"
-        self._log(
-            f"[step {snapshot['step']}] {snapshot['description']}", level
-        )
+        self._log(f"[step {snapshot['step']}] {snapshot['description']}", level)
 
     def _update_step_info(self) -> None:
         if not self.snapshots:
@@ -1123,15 +1138,19 @@ class InteractiveReplannerApp(tk.Tk):
             )
         if self.current_path:
             label = "Rota replanejada" if self.replanning_active else "Rota planejada"
-            color = REPLANNED_PATH_COLOR if self.replanning_active else ORIGINAL_PATH_COLOR
-            self._draw_path(
-                self.current_path, color, label, linewidth=2.4, zorder=3
+            color = (
+                REPLANNED_PATH_COLOR if self.replanning_active else ORIGINAL_PATH_COLOR
             )
+            self._draw_path(self.current_path, color, label, linewidth=2.4, zorder=3)
 
         if self.source_point is not None:
-            self._draw_point(self.source_point, SOURCE_COLOR, "Origem", "o", size=130, zorder=5)
+            self._draw_point(
+                self.source_point, SOURCE_COLOR, "Origem", "o", size=130, zorder=5
+            )
         if self.target_point is not None:
-            self._draw_point(self.target_point, TARGET_COLOR, "Destino", "*", size=220, zorder=5)
+            self._draw_point(
+                self.target_point, TARGET_COLOR, "Destino", "*", size=220, zorder=5
+            )
 
         if self.current_positions:
             for robot_id, position in self.current_positions.items():

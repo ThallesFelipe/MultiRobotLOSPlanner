@@ -112,7 +112,7 @@ def test_plan_candidate_uses_distance_plus_lambda_cost_by_default() -> None:
     assert candidate is not None
     _, path, snapshots, _ = candidate
     assert path == [(0, 0), (0, 1), (0, 2), (0, 3)]
-    assert len(snapshots[0]["positions"]) == 4
+    assert len(snapshots[0]["positions"]) == 3
 
 
 def test_bidas_replanning_scenario_completes_after_top_corridor_obstacle() -> None:
@@ -132,11 +132,8 @@ def test_bidas_replanning_scenario_completes_after_top_corridor_obstacle() -> No
         0: (9, 38),
         1: (9, 38),
         2: (27, 8),
-        3: (53, 7),
     }
-    planning_graph = app._build_planning_graph_for_current_map(
-        extra_vertices={(9, 62)}
-    )
+    planning_graph = app._build_planning_graph_for_current_map(extra_vertices={(9, 62)})
 
     cost, path, snapshots, _ = reactive_replanning(
         planning_graph,
@@ -150,15 +147,18 @@ def test_bidas_replanning_scenario_completes_after_top_corridor_obstacle() -> No
     )
 
     assert cost < interactive_module.INFINITE_PATH_COST
-    assert path == [(53, 7), (41, 8), (39, 82), (9, 82), (8, 98)]
+    assert path[0] == app.source_point
+    assert path[-1] == app.target_point
+    assert len(path) - 1 > len(initial_positions)
+    assert len(snapshots[0]["positions"]) == len(path) - 1
+    for robot_id in range(len(initial_positions), len(path) - 1):
+        assert snapshots[0]["positions"][robot_id] == app.source_point
     assert snapshots[-1]["valid"] is True
-    assert snapshots[-1]["positions"] == {
-        0: (8, 98),
-        1: (9, 82),
-        2: (39, 82),
-        3: (41, 8),
-    }
-    assert not any("Deadlock detected" in snapshot["description"] for snapshot in snapshots)
+    assert snapshots[-1]["positions"][0] == app.target_point
+    assert set(path[1:]).issubset(set(snapshots[-1]["positions"].values()))
+    assert not any(
+        "Deadlock detected" in snapshot["description"] for snapshot in snapshots
+    )
 
 
 def test_replanning_waits_until_leader_reaches_obstacle_edge() -> None:
@@ -169,7 +169,7 @@ def test_replanning_waits_until_leader_reaches_obstacle_edge() -> None:
     app.current_path = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
     app.current_positions = {0: (0, 0), 1: (0, 0)}
     triggered: list[tuple[int, int]] = []
-    app._trigger_reactive_replanning = triggered.append  # type: ignore[method-assign]
+    app._trigger_reactive_replanning = triggered.append
 
     triggered_now = app._maybe_trigger_replanning({(0, 3)}, (0, 3))
 
@@ -264,31 +264,31 @@ def test_failed_replanning_replaces_future_original_snapshots(
     app.current_positions = {0: (0, 1), 1: (0, 0)}
     app.current_snapshot_index = 1
     initial_snapshot: MovementSnapshot = {
-            "step": 0,
-            "robot_id": None,
-            "from_pos": None,
-            "to_pos": None,
-            "positions": {0: (0, 0), 1: (0, 0)},
-            "valid": True,
-            "description": "initial",
+        "step": 0,
+        "robot_id": None,
+        "from_pos": None,
+        "to_pos": None,
+        "positions": {0: (0, 0), 1: (0, 0)},
+        "valid": True,
+        "description": "initial",
     }
     leader_snapshot: MovementSnapshot = {
-            "step": 1,
-            "robot_id": 0,
-            "from_pos": (0, 0),
-            "to_pos": (0, 1),
-            "positions": {0: (0, 1), 1: (0, 0)},
-            "valid": True,
-            "description": "leader moved before obstacle",
+        "step": 1,
+        "robot_id": 0,
+        "from_pos": (0, 0),
+        "to_pos": (0, 1),
+        "positions": {0: (0, 1), 1: (0, 0)},
+        "valid": True,
+        "description": "leader moved before obstacle",
     }
     stale_snapshot: MovementSnapshot = {
-            "step": 2,
-            "robot_id": 0,
-            "from_pos": (0, 1),
-            "to_pos": (0, 3),
-            "positions": {0: (0, 3), 1: (0, 0)},
-            "valid": True,
-            "description": "stale future move through blocked corridor",
+        "step": 2,
+        "robot_id": 0,
+        "from_pos": (0, 1),
+        "to_pos": (0, 3),
+        "positions": {0: (0, 3), 1: (0, 0)},
+        "valid": True,
+        "description": "stale future move through blocked corridor",
     }
     app.snapshots = [initial_snapshot, leader_snapshot, stale_snapshot]
 

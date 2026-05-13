@@ -358,8 +358,8 @@ def test_reactive_replanning_respects_max_relay_robots_constraint() -> None:
     assert path_new == []
 
 
-def test_reactive_replanning_never_adds_additional_relays() -> None:
-    """Insufficient available robots makes replanning infeasible."""
+def test_reactive_replanning_adds_missing_robots_at_source_by_default() -> None:
+    """Replanning may spawn missing robots at the source for a longer path."""
     source: GridPoint = (0, 0)
     target: GridPoint = (0, 4)
     graph = _build_graph(
@@ -379,12 +379,52 @@ def test_reactive_replanning_never_adds_additional_relays() -> None:
         lam=0.0,
     )
 
+    assert math.isclose(cost, 4.0, rel_tol=1e-12, abs_tol=1e-12)
+    assert path_new == [source, (0, 1), (0, 2), (0, 3), target]
+    assert snapshots
+    assert snapshots[0]["positions"] == {
+        0: source,
+        1: source,
+        2: source,
+        3: source,
+    }
+    assert snapshots[-1]["positions"] == {
+        0: target,
+        1: (0, 3),
+        2: (0, 2),
+        3: (0, 1),
+    }
+    assert all(snapshot["valid"] for snapshot in snapshots)
+
+
+def test_reactive_replanning_can_keep_current_robot_count_as_hard_limit() -> None:
+    """Callers can disable spawning and keep the old finite-fleet behavior."""
+    source: GridPoint = (0, 0)
+    target: GridPoint = (0, 4)
+    graph = _build_graph(
+        [
+            (source, (0, 1), 1.0),
+            ((0, 1), (0, 2), 1.0),
+            ((0, 2), (0, 3), 1.0),
+            ((0, 3), target, 1.0),
+        ]
+    )
+
+    cost, path_new, snapshots, _ = reactive_replanning(
+        graph,
+        source=source,
+        target=target,
+        initial_positions={0: source, 1: source},
+        lam=0.0,
+        allow_new_robots=False,
+    )
+
     assert cost == reactive_module.INFINITE_PATH_COST
     assert path_new == []
     assert snapshots
     assert len(snapshots[0]["positions"]) == 2
     assert snapshots[0]["valid"] is False
-    assert "available robot count" in snapshots[0]["description"]
+    assert "configured robot limit" in snapshots[0]["description"]
 
 
 def test_reactive_replan_reports_deadlock_when_extra_robot_cannot_reconnect() -> None:

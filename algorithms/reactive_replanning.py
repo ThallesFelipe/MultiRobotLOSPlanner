@@ -24,6 +24,7 @@ from algorithms.ordered_progression import (
 from algorithms.relay_dijkstra import (
     DEFAULT_RELAY_PENALTY_LAMBDA,
     INFINITE_PATH_COST,
+    relay_dijkstra,
     relay_dijkstra_with_edge_cap,
 )
 from core.map_grid import GridPoint, MapGrid
@@ -300,6 +301,18 @@ def _infeasible_snapshot(
             "description": description,
         }
     ]
+
+
+def _add_missing_robots_at_source(
+    positions: RobotPositions,
+    required_robot_count: int,
+    source: GridPoint,
+) -> RobotPositions:
+    """Returns positions extended with missing robots spawned at the source."""
+    effective_positions = dict(positions)
+    for robot_id in range(len(effective_positions), required_robot_count):
+        effective_positions[robot_id] = source
+    return effective_positions
 
 
 def _next_path_vertex(
@@ -1100,6 +1113,7 @@ def reactive_replanning(
     max_steps: int = DEFAULT_MAX_REACTIVE_STEPS,
     frozen_robot_ids: set[int] | None = None,
     max_relay_robots: int | None = None,
+    allow_new_robots: bool = True,
     record_blocked_attempts: bool = True,
 ) -> tuple[float, list[GridPoint], list[MovementSnapshot], nx.Graph[GridPoint]]:
     """Runs full reactive replanning: graph update, path search, move generation.
@@ -1123,7 +1137,10 @@ def reactive_replanning(
         frozen_robot_ids: Robot ids that must remain stationary during
             replanning.
         max_relay_robots: Optional upper bound on support relay robots in the
-            replanned path. The available robot count is always enforced.
+            replanned path.
+        allow_new_robots: When `True`, missing robots required by the replanned
+            path are added at `source` before generating movement snapshots.
+            When `False`, the current robot count remains a hard limit.
         record_blocked_attempts: When `True`, includes blocked move attempts
             in the returned snapshot list.
 
@@ -1186,29 +1203,42 @@ def reactive_replanning(
             updated_graph,
         )
 
-    max_edges_allowed = available_robot_count
     if max_relay_robots is not None:
         if max_relay_robots < 0:
             raise ValueError(
                 "max_relay_robots must be greater than or equal to 0; "
                 f"received max_relay_robots={max_relay_robots}."
             )
-        max_edges_allowed = min(max_edges_allowed, max_relay_robots + 1)
+        max_edges_allowed: int | None = max_relay_robots + 1
+        if not allow_new_robots:
+            max_edges_allowed = min(max_edges_allowed, available_robot_count)
+    elif allow_new_robots:
+        max_edges_allowed = None
+    else:
+        max_edges_allowed = available_robot_count
 
-    path_cost, path_new = relay_dijkstra_with_edge_cap(
-        updated_graph,
-        source,
-        target,
-        lam,
-        max_edges=max_edges_allowed,
-    )
+    if max_edges_allowed is None:
+        path_cost, path_new = relay_dijkstra(updated_graph, source, target, lam)
+    else:
+        path_cost, path_new = relay_dijkstra_with_edge_cap(
+            updated_graph,
+            source,
+            target,
+            lam,
+            max_edges=max_edges_allowed,
+        )
 
     if path_cost == INFINITE_PATH_COST:
+        limit_description = (
+            "the configured robot limit"
+            if max_edges_allowed is not None
+            else "the updated graph"
+        )
         unreachable_snapshots = _infeasible_snapshot(
             dict(initial_positions),
             (
                 "Reactive replanning failed: no feasible path after graph "
-                "update within available robot count."
+                f"update within {limit_description}."
             ),
         )
         return path_cost, [], unreachable_snapshots, updated_graph
@@ -1216,15 +1246,22 @@ def reactive_replanning(
     effective_initial_positions = dict(initial_positions)
     required_robot_count = len(path_new) - 1
     if len(effective_initial_positions) < required_robot_count:
-        infeasible_snapshots = _infeasible_snapshot(
+        if not allow_new_robots:
+            infeasible_snapshots = _infeasible_snapshot(
+                effective_initial_positions,
+                (
+                    "Reactive replanning failed: path requires "
+                    f"{required_robot_count} robot(s), but only "
+                    f"{len(effective_initial_positions)} are available."
+                ),
+            )
+            return INFINITE_PATH_COST, [], infeasible_snapshots, updated_graph
+
+        effective_initial_positions = _add_missing_robots_at_source(
             effective_initial_positions,
-            (
-                "Reactive replanning failed: path requires "
-                f"{required_robot_count} robot(s), but only "
-                f"{len(effective_initial_positions)} are available."
-            ),
+            required_robot_count,
+            source,
         )
-        return INFINITE_PATH_COST, [], infeasible_snapshots, updated_graph
 
     snapshots = reactive_replan(
         updated_graph,
